@@ -2,18 +2,12 @@ import { ItemView, WorkspaceLeaf, MarkdownRenderer, Notice, Modal, App } from "o
 import type { ChatMsg } from "../llm/chatClient";
 import type { QueryHit } from "../rag/vectorStore";
 import { saveNote, saveImage } from "../noteWriter";
-import type LearningTutorPlugin from "../main";
+import { extractMermaid } from "../util/mermaid";
+import type CobrainPlugin from "../main";
 
-export const VIEW_TYPE_LT_CHAT = "lt-chat";
+export const VIEW_TYPE_COBRAIN_CHAT = "cobrain-chat";
 
 const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e));
-
-function extractMermaid(text: string): string | null {
-  const m = text.match(/```mermaid[\s\S]*?```/);
-  if (m) return m[0];
-  if (/(graph\s+(TD|LR|RL|BT))|flowchart/i.test(text)) return "```mermaid\n" + text.trim() + "\n```";
-  return null;
-}
 
 export class ChatView extends ItemView {
   private history: ChatMsg[] = [];
@@ -25,11 +19,11 @@ export class ChatView extends ItemView {
   private sendBtn!: HTMLButtonElement;
   private busy = false; // 一次只跑一轮 ask，避免连发导致 history 交错
 
-  constructor(leaf: WorkspaceLeaf, private plugin: LearningTutorPlugin) {
+  constructor(leaf: WorkspaceLeaf, private plugin: CobrainPlugin) {
     super(leaf);
   }
 
-  getViewType(): string { return VIEW_TYPE_LT_CHAT; }
+  getViewType(): string { return VIEW_TYPE_COBRAIN_CHAT; }
   getDisplayText(): string { return "创作副脑"; }
   getIcon(): string { return "brain"; }
 
@@ -126,13 +120,24 @@ export class ChatView extends ItemView {
     return "";
   }
 
-  private async send(): Promise<void> {
-    if (this.busy) return;
-    const text = this.inputEl.value.trim();
-    if (!text) return;
+  // 占用面板：busy 期间禁用输入/发送，并让 send 与三个按钮（及彼此）互斥，避免并发请求把对话/产物交错。
+  private acquire(): boolean {
+    if (this.busy) { new Notice("正在处理上一个请求，请稍候…"); return false; }
     this.busy = true;
     this.inputEl.disabled = true;
     this.sendBtn.disabled = true;
+    return true;
+  }
+  private release(): void {
+    this.busy = false;
+    this.inputEl.disabled = false;
+    this.sendBtn.disabled = false;
+  }
+
+  private async send(): Promise<void> {
+    const text = this.inputEl.value.trim();
+    if (!text) return;
+    if (!this.acquire()) return;
     this.inputEl.value = "";
     this.addBubble("user", text);
     const thinking = this.addBubble("assistant", "思考中…");
@@ -149,9 +154,7 @@ export class ChatView extends ItemView {
       thinking.remove();
       this.addBubble("assistant", "出错了：" + errMsg(e));
     } finally {
-      this.busy = false;
-      this.inputEl.disabled = false;
-      this.sendBtn.disabled = false;
+      this.release();
       this.inputEl.focus();
     }
   }
@@ -162,6 +165,7 @@ export class ChatView extends ItemView {
       new Notice("先聊点什么，再画概念图");
       return;
     }
+    if (!this.acquire()) return;
     const bubble = this.addBubble("assistant", "画概念图中…");
     try {
       const raw = await this.plugin.tutor.conceptMap(t);
@@ -169,8 +173,11 @@ export class ChatView extends ItemView {
       bubble.remove();
       this.addBubble("assistant", this.lastMermaid ?? "（未能生成有效的概念图）\n\n" + raw);
     } catch (e) {
+      this.lastMermaid = null; // 失败不保留上一个话题的旧图，避免存笔记时把陈旧图串进去
       bubble.remove();
       this.addBubble("assistant", "概念图失败：" + errMsg(e));
+    } finally {
+      this.release();
     }
   }
 
@@ -179,22 +186,25 @@ export class ChatView extends ItemView {
   private doImage(): void {
     new PromptModal(this.app, "给哪个概念配图？", this.currentTopic(), async concept => {
       if (!concept) return;
+      if (!this.acquire()) return;
       const notice = new Notice("扩写配图提示词中…", 0);
       let scene: string;
       try {
         scene = await this.plugin.tutor.imagePrompt(concept);
       } catch (e) {
-        notice.hide();
         new Notice("提示词扩写失败：" + errMsg(e));
         return;
+      } finally {
+        notice.hide();
+        this.release(); // 扩写完即释放：用户编辑提示词期间不该锁住对话面板
       }
-      notice.hide();
       const style = this.plugin.settings.imageStyle;
       const fullPrompt = [scene.trim(), style ? `风格：${style}` : "", "画面中不要出现任何文字。"]
         .filter(Boolean)
         .join("\n\n");
       new TextAreaModal(this.app, "确认 / 编辑配图提示词", fullPrompt, async finalPrompt => {
         if (!finalPrompt) return;
+        if (!this.acquire()) return;
         const bubble = this.addBubble("assistant", `为「${concept}」配图中…（图像生成较慢，约 1 分钟，请稍候）`);
         try {
           const buf = await this.plugin.image.generate(finalPrompt);
@@ -205,6 +215,8 @@ export class ChatView extends ItemView {
         } catch (e) {
           bubble.remove();
           this.addBubble("assistant", "配图失败：" + errMsg(e));
+        } finally {
+          this.release();
         }
       }).open();
     }).open();
@@ -215,6 +227,7 @@ export class ChatView extends ItemView {
       new Notice("还没有对话可保存");
       return;
     }
+    if (!this.acquire()) return;
     const notice = new Notice("整理成笔记中…", 0);
     try {
       const { title, body } = await this.plugin.tutor.summarizeNote(this.history);
@@ -229,11 +242,16 @@ export class ChatView extends ItemView {
         imageEmbed: this.lastImageEmbed,
         conversation,
       });
-      notice.hide();
       new Notice("已保存：" + path);
+      // 每篇笔记消费掉本轮累积的产物与来源，避免渗进下一篇（旧概念图/配图/来源串台）
+      this.lastMermaid = null;
+      this.lastImageEmbed = null;
+      this.sources.clear();
     } catch (e) {
-      notice.hide();
       new Notice("保存失败：" + errMsg(e));
+    } finally {
+      notice.hide();
+      this.release();
     }
   }
 

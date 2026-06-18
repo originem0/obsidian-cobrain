@@ -1,6 +1,11 @@
 import { requestUrl } from "obsidian";
+import { withTimeout } from "../util/withTimeout";
 import type { Embedder } from "./embedder";
-import type { LTSettings } from "../settings";
+import type { CobrainSettings } from "../settings";
+
+// 嵌入超时 60s；端点探测（/models、逐个试嵌入）用更短的 30s。requestUrl 不可中止，超时仅解锁 UI。
+const EMBED_TIMEOUT_MS = 60_000;
+const DETECT_TIMEOUT_MS = 30_000;
 
 // L2 归一化：向量库用点积当 cosine（topK 约定向量已归一化），故这里统一归一化。
 function normalize(v: number[]): number[] {
@@ -17,27 +22,28 @@ function sleep(ms: number): Promise<void> {
 // OpenAI 兼容的云端 embeddings。用 Obsidian requestUrl（免 CORS）异步调用，不占用主线程。
 // 持有 settings 引用，调用时读最新 baseUrl/key/model（改设置即时生效）。
 export class ApiEmbedder implements Embedder {
-  dim: number | null = null;
-
-  constructor(private settings: LTSettings) {}
+  constructor(private settings: CobrainSettings) {}
 
   private async embed(inputs: string[]): Promise<number[][]> {
     const url = `${this.settings.embedBaseUrl.replace(/\/+$/, "")}/embeddings`;
     const maxRetries = 3;
     for (let attempt = 0; ; attempt++) {
-      const res = await requestUrl({
-        url,
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${this.settings.embedKey}` },
-        body: JSON.stringify({ model: this.settings.embedModel, input: inputs }),
-        throw: false,
-      });
+      const res = await withTimeout(
+        requestUrl({
+          url,
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${this.settings.embedKey}` },
+          body: JSON.stringify({ model: this.settings.embedModel, input: inputs }),
+          throw: false,
+        }),
+        EMBED_TIMEOUT_MS,
+        "嵌入 API",
+      );
       if (res.status === 200) {
         const data = (res.json.data as { embedding: number[]; index: number }[])
           .slice()
           .sort((a, b) => a.index - b.index);
         const vecs = data.map(d => normalize(d.embedding));
-        if (vecs[0]) this.dim = vecs[0].length;
         return vecs;
       }
       // 429（限流）/ 5xx（服务端抖动）退避重试；其它 4xx 是请求本身的问题，重试无意义，直接抛
@@ -71,11 +77,15 @@ export async function detectEmbeddingModels(
   apiKey: string,
 ): Promise<{ id: string; dim: number }[]> {
   const base = baseUrl.replace(/\/+$/, "");
-  const listRes = await requestUrl({
-    url: `${base}/models`,
-    headers: { Authorization: `Bearer ${apiKey}` },
-    throw: false,
-  });
+  const listRes = await withTimeout(
+    requestUrl({
+      url: `${base}/models`,
+      headers: { Authorization: `Bearer ${apiKey}` },
+      throw: false,
+    }),
+    DETECT_TIMEOUT_MS,
+    "拉取模型列表",
+  );
   if (listRes.status !== 200) {
     throw new Error(`拉取 /models 失败：HTTP ${listRes.status}`);
   }
@@ -93,13 +103,17 @@ export async function detectEmbeddingModels(
     const results = await Promise.all(
       batch.map(async id => {
         try {
-          const r = await requestUrl({
-            url: `${base}/embeddings`,
-            method: "POST",
-            headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
-            body: JSON.stringify({ model: id, input: "测试" }),
-            throw: false,
-          });
+          const r = await withTimeout(
+            requestUrl({
+              url: `${base}/embeddings`,
+              method: "POST",
+              headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+              body: JSON.stringify({ model: id, input: "测试" }),
+              throw: false,
+            }),
+            DETECT_TIMEOUT_MS,
+            "探测嵌入模型",
+          );
           const dim = r.status === 200 ? r.json?.data?.[0]?.embedding?.length ?? 0 : 0;
           return dim > 0 ? { id, dim } : null;
         } catch {

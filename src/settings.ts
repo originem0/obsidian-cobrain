@@ -1,8 +1,8 @@
 import { App, PluginSettingTab, Setting, Notice } from "obsidian";
 import { detectEmbeddingModels } from "./rag/apiEmbedder";
-import type LearningTutorPlugin from "./main";
+import type CobrainPlugin from "./main";
 
-export interface LTSettings {
+export interface CobrainSettings {
   llmBaseUrl: string;
   llmKey: string;
   llmModel: string;
@@ -43,7 +43,7 @@ const DEFAULT_CONCEPT_MAP_PROMPT =
 const DEFAULT_NOTE_PROMPT =
   "把下面这段学习对话整理成一篇结构化的中文笔记（不是聊天记录原文）。第一行用 `标题：xxx` 给出简短标题；其后是正文：用小标题和要点组织核心概念、拆解与结论，去掉寒暄口水。Markdown 格式。";
 
-export const DEFAULT_SETTINGS: LTSettings = {
+export const DEFAULT_SETTINGS: CobrainSettings = {
   llmBaseUrl: "https://wududu.edu.kg/v1",
   llmKey: "",
   llmModel: "z-ai/glm-5.1",
@@ -68,11 +68,11 @@ export const DEFAULT_SETTINGS: LTSettings = {
 };
 
 // 只允许把值为 string 的设置键传给文本/文本域助手，避免把 boolean 键喂进去
-type StringKeys = { [K in keyof LTSettings]: LTSettings[K] extends string ? K : never }[keyof LTSettings];
+type StringKeys = { [K in keyof CobrainSettings]: CobrainSettings[K] extends string ? K : never }[keyof CobrainSettings];
 
-export class LTSettingTab extends PluginSettingTab {
+export class CobrainSettingTab extends PluginSettingTab {
   private detectedEmbed: { id: string; dim: number }[] = [];
-  constructor(app: App, private plugin: LearningTutorPlugin) { super(app, plugin); }
+  constructor(app: App, private plugin: CobrainPlugin) { super(app, plugin); }
 
   display(): void {
     const { containerEl } = this;
@@ -81,18 +81,18 @@ export class LTSettingTab extends PluginSettingTab {
 
     const text = (name: string, desc: string, key: StringKeys, ph = "") =>
       new Setting(containerEl).setName(name).setDesc(desc).addText(t =>
-        t.setPlaceholder(ph).setValue(s[key]).onChange(async v => {
+        t.setPlaceholder(ph).setValue(s[key]).onChange(v => {
           s[key] = v.trim();
-          await this.plugin.saveSettings();
+          this.plugin.saveSettingsDebounced();
         })
       );
 
     // 提示词等多行文本：不 trim（保留换行/缩进）
     const textArea = (name: string, desc: string, key: StringKeys) =>
       new Setting(containerEl).setName(name).setDesc(desc).addTextArea(t => {
-        t.setValue(s[key]).onChange(async v => {
+        t.setValue(s[key]).onChange(v => {
           s[key] = v;
-          await this.plugin.saveSettings();
+          this.plugin.saveSettingsDebounced();
         });
         t.inputEl.rows = 6;
         t.inputEl.style.width = "100%";
@@ -112,6 +112,11 @@ export class LTSettingTab extends PluginSettingTab {
     textArea("风格预设", "拼到每张配图提示词尾部，统一画风", "imageStyle");
 
     containerEl.createEl("h3", { text: "嵌入 API（语义检索）" });
+    const warn = containerEl.createEl("p", {
+      text: "隐私提示：建立索引会把你的笔记全文分块发送到这个嵌入端点。请使用你信任的端点；默认填的免费代理仅供试用，别拿它跑你不愿外传的私密笔记。",
+    });
+    warn.style.cssText =
+      "font-size:0.85em; margin:4px 0 10px; padding:6px 10px; line-height:1.5; border-left:3px solid var(--text-error); background:var(--background-secondary); border-radius:4px;";
     text("Base URL", "OpenAI 兼容 embeddings 端点", "embedBaseUrl");
     text("API Key", "仅存本地，不入库", "embedKey", "sk-...");
     new Setting(containerEl)
@@ -155,7 +160,7 @@ export class LTSettingTab extends PluginSettingTab {
           // 换模型 → 旧向量维度/空间不兼容，立即清空，待重建
           this.plugin.store.deserialize(null);
           await this.plugin.persistIndex();
-          new Notice(`已切到 ${v}，索引已清空，请运行「LT: 重建索引」`);
+          new Notice(`已切到 ${v}，索引已清空，请运行「Cobrain: 重建索引」`);
         });
       });
 

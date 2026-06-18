@@ -1,7 +1,8 @@
 import { Retriever } from "../rag/retriever";
 import { ChatClient, ChatMsg } from "../llm/chatClient";
 import type { QueryHit } from "../rag/vectorStore";
-import type { LTSettings } from "../settings";
+import type { CobrainSettings } from "../settings";
+import { parseNote } from "../util/noteFormat";
 
 // 概念图详细度档位 → 给 LLM 的节点数指示
 const DETAIL_HINT: Record<string, string> = {
@@ -12,7 +13,7 @@ const DETAIL_HINT: Record<string, string> = {
 
 export class Tutor {
   // settings 引用：提示词、概念图方向/详细度等均在调用时读最新值（改设置即时生效）
-  constructor(private retriever: Retriever, private chat: ChatClient, private settings: LTSettings) {}
+  constructor(private retriever: Retriever, private chat: ChatClient, private settings: CobrainSettings) {}
 
   private async retrieveContext(query: string): Promise<{ context: string; sources: string[]; hits: QueryHit[] }> {
     try {
@@ -84,9 +85,7 @@ export class Tutor {
       ],
       { temperature: 0.3, maxTokens: 4096 },
     );
-    const m = reply.match(/^标题[：:]\s*(.+)$/m);
-    const title = m ? m[1].trim() : "cobrain-note";
-    const body = reply.replace(/^标题[：:]\s*.+$/m, "").trim();
-    return { title, body };
+    // 标题/正文解析抽到纯函数（util/noteFormat），便于单测 LLM 不照格式时的回退
+    return parseNote(reply);
   }
 }

@@ -6,6 +6,7 @@ export function chunkMarkdown(content: string, maxChars = 1000): Chunk[] {
   const chunks: Chunk[] = [];
   let heading = "";
   let buf: string[] = [];
+  let inFence = false;
 
   const flush = () => {
     const text = buf.join("\n").trim();
@@ -22,6 +23,17 @@ export function chunkMarkdown(content: string, maxChars = 1000): Chunk[] {
   };
 
   for (const line of lines) {
+    // 代码围栏（``` 或 ~~~，允许 ≤3 空格缩进）：进入/退出。围栏内所有行原样累积，
+    // 不参与标题/段落边界判定——否则代码里的「# 注释」会被当成 Markdown 标题，污染分块与 heading 归属。
+    if (/^\s{0,3}(```|~~~)/.test(line)) {
+      inFence = !inFence;
+      buf.push(line);
+      continue;
+    }
+    if (inFence) {
+      buf.push(line);
+      continue;
+    }
     const m = line.match(/^(#{1,6})\s+(.*)$/);
     if (m) {
       flush();

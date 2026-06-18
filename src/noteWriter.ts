@@ -1,5 +1,6 @@
 import { App, normalizePath } from "obsidian";
-import type { LTSettings } from "./settings";
+import { sanitizeFilename } from "./util/noteFormat";
+import type { CobrainSettings } from "./settings";
 
 export interface NotePayload {
   title: string;
@@ -10,10 +11,6 @@ export interface NotePayload {
   conversation?: string | null; // 原始对话（appendConversation 开启时附在末尾）
 }
 
-function sanitize(name: string): string {
-  return name.replace(/[\\/:*?"<>|#^[\]]/g, "").trim().slice(0, 80) || "cobrain-note";
-}
-
 async function ensureFolder(app: App, folder: string): Promise<void> {
   if (!app.vault.getAbstractFileByPath(folder)) {
     await app.vault.createFolder(folder).catch(() => {});
@@ -21,7 +18,7 @@ async function ensureFolder(app: App, folder: string): Promise<void> {
 }
 
 // 把导师综述 + 概念图 + 配图 + 相关笔记双链写成一篇结构化笔记，返回路径。
-export async function saveNote(app: App, settings: LTSettings, p: NotePayload): Promise<string> {
+export async function saveNote(app: App, settings: CobrainSettings, p: NotePayload): Promise<string> {
   const folder = normalizePath(settings.noteFolder || "cobrain-note");
   await ensureFolder(app, folder);
 
@@ -42,17 +39,18 @@ export async function saveNote(app: App, settings: LTSettings, p: NotePayload): 
   }
   const content = parts.join("\n");
 
-  let path = `${folder}/${sanitize(p.title)}.md`;
-  if (app.vault.getAbstractFileByPath(path)) path = `${folder}/${sanitize(p.title)} ${Date.now()}.md`;
+  const base = sanitizeFilename(p.title);
+  let path = `${folder}/${base}.md`;
+  if (app.vault.getAbstractFileByPath(path)) path = `${folder}/${base} ${Date.now()}.md`;
   await app.vault.create(path, content);
   return path;
 }
 
 // 保存配图到附件目录，返回 vault 相对路径（供 ![[path]] 嵌入）。
-export async function saveImage(app: App, settings: LTSettings, buf: ArrayBuffer): Promise<string> {
+export async function saveImage(app: App, settings: CobrainSettings, buf: ArrayBuffer): Promise<string> {
   const folder = normalizePath(settings.attachmentFolder || "cobrain-note/附件");
   await ensureFolder(app, folder);
-  const path = `${folder}/lt-${Date.now()}.png`;
+  const path = `${folder}/cobrain-${Date.now()}.png`;
   await app.vault.createBinary(path, buf);
   return path;
 }

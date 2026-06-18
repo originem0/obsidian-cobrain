@@ -1,16 +1,16 @@
-import { Plugin, Notice, TFile, Modal, App } from "obsidian";
-import { LTSettings, DEFAULT_SETTINGS, LTSettingTab } from "./settings";
+import { Plugin, Notice, TFile, Modal, App, normalizePath, debounce } from "obsidian";
+import { CobrainSettings, DEFAULT_SETTINGS, CobrainSettingTab } from "./settings";
 import { ApiEmbedder } from "./rag/apiEmbedder";
 import { VectorStore, type QueryHit } from "./rag/vectorStore";
 import { Indexer } from "./rag/indexer";
 import { Retriever } from "./rag/retriever";
 import { ChatClient } from "./llm/chatClient";
 import { Tutor } from "./tutor/tutor";
-import { ChatView, VIEW_TYPE_LT_CHAT } from "./ui/chatView";
+import { ChatView, VIEW_TYPE_COBRAIN_CHAT } from "./ui/chatView";
 import { ImageClient } from "./llm/imageClient";
 
-export default class LearningTutorPlugin extends Plugin {
-  settings!: LTSettings;
+export default class CobrainPlugin extends Plugin {
+  settings!: CobrainSettings;
   store!: VectorStore;
   embedder!: ApiEmbedder;
   indexer!: Indexer;
@@ -19,19 +19,18 @@ export default class LearningTutorPlugin extends Plugin {
   image!: ImageClient;
   // 按路径防抖「modify → 嵌入」的定时器，避免编辑期间反复触发 modify 反复打嵌入接口
   private modifyTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  // 设置页逐字符 onChange 走这个防抖版：停顿 400ms 才落盘，避免每键一次写。
+  // 索引已拆出 data.json（见 persistIndex），settings 本身已很小，这里再省掉高频小写入。
+  saveSettingsDebounced = debounce(() => void this.saveSettings(), 400, true);
+  private disposed = false; // 卸载后置位：阻止已排队的防抖回调在插件卸载后继续写盘
 
   async onload() {
     await this.loadSettings();
-    this.addSettingTab(new LTSettingTab(this.app, this));
+    this.addSettingTab(new CobrainSettingTab(this.app, this));
 
     this.store = new VectorStore();
-    const data = await this.loadData();
-    this.store.deserialize(data?.index ?? null);
-    // 嵌入模型变更 → 旧向量维度/空间不兼容，清空待重建
-    if (data?.embedModel && data.embedModel !== this.settings.embedModel) {
-      this.store.deserialize(null);
-      new Notice("嵌入模型已变更，旧索引已清空，请重新「LT: 重建索引」");
-    }
+    // 索引从独立的 index.json 加载（旧版本塞在 data.json 里的会在此一次性迁移过来）
+    await this.loadIndex();
     this.embedder = new ApiEmbedder(this.settings);
     this.indexer = new Indexer(this.app, this.embedder, this.store);
     this.retriever = new Retriever(this.embedder, this.store);
@@ -39,22 +38,24 @@ export default class LearningTutorPlugin extends Plugin {
     this.tutor = new Tutor(this.retriever, chatClient, this.settings);
     this.image = new ImageClient(this.settings);
 
-    this.registerView(VIEW_TYPE_LT_CHAT, (leaf) => new ChatView(leaf, this));
+    this.registerView(VIEW_TYPE_COBRAIN_CHAT, (leaf) => new ChatView(leaf, this));
+    // 改名收尾：清掉旧视图类型 "lt-chat" 残留的孤儿面板（改名后该类型已不再注册）
+    this.app.workspace.onLayoutReady(() => this.app.workspace.detachLeavesOfType("lt-chat"));
     this.addRibbonIcon("brain", "创作副脑", () => this.activateChatView());
     this.addCommand({
-      id: "lt-open-tutor",
+      id: "cobrain-open-tutor",
       name: "Cobrain: 打开创作副脑",
       callback: () => this.activateChatView(),
     });
 
     this.addCommand({
-      id: "lt-reindex",
+      id: "cobrain-reindex",
       name: "Cobrain: 重建索引",
       callback: () => this.indexer.reindexAll(() => this.persistIndex()),
     });
 
     this.addCommand({
-      id: "lt-test-retrieval",
+      id: "cobrain-test-retrieval",
       name: "Cobrain: 测试检索",
       callback: () => new QueryModal(this.app, async (q) => {
         const hits = await this.retriever.retrieve(q, 8);
@@ -73,27 +74,71 @@ export default class LearningTutorPlugin extends Plugin {
       this.persistIndex();
     }));
 
-    console.log("Learning Tutor loaded");
+    console.log("Cobrain loaded");
   }
 
-  onunload() { console.log("Learning Tutor unloaded"); }
+  onunload() {
+    // 清掉所有挂起的防抖重嵌定时器：用的是裸 setTimeout（非 registerInterval），
+    // 不主动清的话，插件卸载/更新后回调仍会 fire，对已卸载实例 saveData。
+    this.disposed = true;
+    for (const t of this.modifyTimers.values()) clearTimeout(t);
+    this.modifyTimers.clear();
+    console.log("Cobrain unloaded");
+  }
 
-  // data.json 结构：{ settings, index } 两个独立命名空间，互不覆盖
+  // data.json 现在只存设置；向量索引已拆到独立的 index.json（见 loadIndex/persistIndex）。
   async loadSettings() {
     const data = await this.loadData();
     this.settings = Object.assign({}, DEFAULT_SETTINGS, data?.settings);
   }
 
+  // 只写设置（极小）。索引不再混在 data.json 里，故无需 read-modify-write，也不会与 persistIndex 互踩。
   async saveSettings() {
-    const data = (await this.loadData()) ?? {};
-    data.settings = this.settings;
-    await this.saveData(data);
+    await this.saveData({ settings: this.settings });
   }
 
-  async persistIndex() {
-    // 直接整体写入，不再 loadData 读一遍（避免索引增大后每次持久化的 O(n²) I/O）
-    // 记录嵌入模型，换模型时据此判断旧索引失效
-    await this.saveData({ settings: this.settings, index: this.store.serialize(), embedModel: this.settings.embedModel });
+  // 索引独立持久化到插件目录的 index.json，与 data.json（设置）彻底解耦：
+  // 改设置不再重写整份索引，两条写路径也不会再 lost-update 互踩。
+  async persistIndex(): Promise<void> {
+    const payload = { ...this.store.serialize(), embedModel: this.settings.embedModel };
+    await this.app.vault.adapter.write(this.indexPath(), JSON.stringify(payload));
+  }
+
+  // 索引文件路径：插件目录下 index.json（manifest.dir 缺省时回退到 configDir 下的标准插件路径）。
+  private indexPath(): string {
+    const dir = this.manifest.dir ?? `${this.app.vault.configDir}/plugins/${this.manifest.id}`;
+    return normalizePath(`${dir}/index.json`);
+  }
+
+  // 启动加载索引：优先读 index.json；不存在则尝试从旧版 data.json.index 一次性迁移并剥离。
+  private async loadIndex(): Promise<void> {
+    type IndexPayload = ReturnType<VectorStore["serialize"]> & { embedModel?: string };
+    const path = this.indexPath();
+    let payload: IndexPayload | null = null;
+    if (await this.app.vault.adapter.exists(path)) {
+      try {
+        payload = JSON.parse(await this.app.vault.adapter.read(path));
+      } catch (e) {
+        console.error("Cobrain: index.json 解析失败，按空索引处理", e);
+      }
+    } else {
+      // 迁移：旧版本把索引塞在 data.json 里。搬到独立文件，并把 index/embedModel 从 data.json 剥掉。
+      const data = (await this.loadData()) ?? {};
+      if (data.index) {
+        payload = { ...data.index, embedModel: data.embedModel };
+        await this.app.vault.adapter.write(path, JSON.stringify(payload));
+        delete data.index;
+        delete data.embedModel;
+        await this.saveData(data);
+        console.log("Cobrain: 已把旧索引从 data.json 迁移到 index.json");
+      }
+    }
+    this.store.deserialize(payload ?? null);
+    // 换嵌入模型 → 维度/空间不兼容，清空待重建
+    if (payload?.embedModel && payload.embedModel !== this.settings.embedModel) {
+      this.store.deserialize(null);
+      new Notice("嵌入模型已变更，旧索引已清空，请重新「Cobrain: 重建索引」");
+    }
   }
 
   // 防抖重嵌：编辑停顿约 2.5s 才嵌入变更文件。失败冒泡为 Notice，不再静默吞掉（旧代码无 catch）。
@@ -104,6 +149,7 @@ export default class LearningTutorPlugin extends Plugin {
       file.path,
       setTimeout(() => {
         this.modifyTimers.delete(file.path);
+        if (this.disposed) return; // 卸载后不再写盘
         this.indexer
           .onModify(file)
           .then(() => this.persistIndex())
@@ -116,10 +162,10 @@ export default class LearningTutorPlugin extends Plugin {
 
   async activateChatView(): Promise<void> {
     const { workspace } = this.app;
-    let leaf = workspace.getLeavesOfType(VIEW_TYPE_LT_CHAT)[0];
+    let leaf = workspace.getLeavesOfType(VIEW_TYPE_COBRAIN_CHAT)[0];
     if (!leaf) {
       leaf = workspace.getRightLeaf(false)!;
-      await leaf.setViewState({ type: VIEW_TYPE_LT_CHAT, active: true });
+      await leaf.setViewState({ type: VIEW_TYPE_COBRAIN_CHAT, active: true });
     }
     workspace.revealLeaf(leaf);
   }
@@ -146,7 +192,7 @@ class ResultsModal extends Modal {
     const { contentEl } = this;
     contentEl.createEl("h3", { text: `检索：${this.query}` });
     if (!this.hits.length) {
-      contentEl.createEl("p", { text: "无命中（索引为空？先「LT: 重建索引」）" });
+      contentEl.createEl("p", { text: "无命中（索引为空？先「Cobrain: 重建索引」）" });
       return;
     }
     this.hits.forEach((h, i) => {

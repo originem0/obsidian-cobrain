@@ -3,5 +3,4 @@ export interface Embedder {
   embedDocuments(texts: string[]): Promise<number[][]>;
   // 查询侧嵌入
   embedQuery(text: string): Promise<number[]>;
-  readonly dim: number | null;
 }
