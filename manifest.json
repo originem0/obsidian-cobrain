@@ -1,0 +1,9 @@
+{
+  "id": "learning-tutor",
+  "name": "Learning Tutor",
+  "version": "0.1.0",
+  "minAppVersion": "1.4.0",
+  "description": "懂你 vault 的对话式学习导师：RAG 检索 + 概念图 + 配图。",
+  "author": "samsara",
+  "isDesktopOnly": true
+}
