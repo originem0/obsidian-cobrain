@@ -27,7 +27,7 @@ export class LocalEmbedder implements Embedder {
     if (!this.loading) {
       this.loading = (async () => {
         this.extractor = await pipeline("feature-extraction", this.modelId, {
-          device: "cpu",
+          device: "wasm",
           dtype: "fp32",
         });
       })();
