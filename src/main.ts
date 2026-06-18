@@ -19,7 +19,7 @@ export default class LearningTutorPlugin extends Plugin {
     this.store = new VectorStore();
     const data = await this.loadData();
     this.store.deserialize(data?.index ?? null);
-    this.embedder = new LocalEmbedder(this.settings.embedModel, true, await this.loadOrtWasmPaths());
+    this.embedder = new LocalEmbedder(this.settings.embedModel, true, this.loadOrtWasmPrefix());
     this.indexer = new Indexer(this.app, this.embedder, this.store);
     this.retriever = new Retriever(this.embedder, this.store);
 
@@ -71,24 +71,15 @@ export default class LearningTutorPlugin extends Plugin {
     await this.saveData(data);
   }
 
-  // 读取随插件分发的 patched onnxruntime-web glue + wasm，做成 blob URL 喂给 onnxruntime-web，
-  // 杜绝其从 CDN 取多线程 glue（会 import worker_threads，在渲染进程解析失败）。
-  async loadOrtWasmPaths(): Promise<Record<string, string> | undefined> {
-    try {
-      const dir = this.manifest.dir;
-      if (!dir) return undefined;
-      const glueText = await this.app.vault.adapter.read(`${dir}/ort-wasm-simd-threaded.jsep.mjs`);
-      const wasmBin = await this.app.vault.adapter.readBinary(`${dir}/ort-wasm-simd-threaded.jsep.wasm`);
-      const glueUrl = URL.createObjectURL(new Blob([glueText], { type: "text/javascript" }));
-      const wasmUrl = URL.createObjectURL(new Blob([wasmBin], { type: "application/wasm" }));
-      return {
-        "ort-wasm-simd-threaded.jsep.mjs": glueUrl,
-        "ort-wasm-simd-threaded.jsep.wasm": wasmUrl,
-      };
-    } catch (e) {
-      console.error("Learning Tutor: 本地 ort wasm 资源加载失败，回退默认", e);
-      return undefined;
-    }
+  // 把随插件分发的 patched glue + wasm 所在目录转成 onnxruntime-web 可用的 app:// 前缀。
+  // 必须用字符串前缀（而非对象）——ORT 用 wasmPaths 前缀拼 .mjs 文件名；对象形式它只认 .wasm，
+  // .mjs 会退回默认 base（app://obsidian.md/）导致 404。
+  loadOrtWasmPrefix(): string | undefined {
+    const dir = this.manifest.dir;
+    if (!dir) return undefined;
+    // getResourcePath 返回 app://<hash>/<绝对路径>?<ver>，去掉文件名与查询串得到目录前缀
+    const res = this.app.vault.adapter.getResourcePath(`${dir}/ort-wasm-simd-threaded.jsep.wasm`);
+    return res.replace(/ort-wasm-simd-threaded\.jsep\.wasm.*$/, "");
   }
 }
 

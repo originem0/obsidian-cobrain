@@ -10,7 +10,7 @@ export class LocalEmbedder implements Embedder {
   constructor(
     private modelId = "Xenova/multilingual-e5-small",
     private useE5Prefix = true,
-    private wasmPaths?: Record<string, string>,
+    private wasmPaths?: string,
   ) {
     // 允许从 HF CDN 拉取模型；首次使用时下载并缓存
     env.allowRemoteModels = true;
