@@ -1,14 +1,16 @@
-import { Plugin, Notice, TFile } from "obsidian";
+import { Plugin, Notice, TFile, Modal, App } from "obsidian";
 import { LTSettings, DEFAULT_SETTINGS, LTSettingTab } from "./settings";
 import { LocalEmbedder } from "./rag/localEmbedder";
 import { VectorStore } from "./rag/vectorStore";
 import { Indexer } from "./rag/indexer";
+import { Retriever } from "./rag/retriever";
 
 export default class LearningTutorPlugin extends Plugin {
   settings!: LTSettings;
   store!: VectorStore;
   embedder!: LocalEmbedder;
   indexer!: Indexer;
+  retriever!: Retriever;
 
   async onload() {
     await this.loadSettings();
@@ -19,11 +21,22 @@ export default class LearningTutorPlugin extends Plugin {
     this.store.deserialize(data?.index ?? null);
     this.embedder = new LocalEmbedder(this.settings.embedModel);
     this.indexer = new Indexer(this.app, this.embedder, this.store);
+    this.retriever = new Retriever(this.embedder, this.store);
 
     this.addCommand({
       id: "lt-reindex",
       name: "LT: 重建索引",
       callback: () => this.indexer.reindexAll(() => this.persistIndex()),
+    });
+
+    this.addCommand({
+      id: "lt-test-retrieval",
+      name: "LT: 测试检索",
+      callback: () => new QueryModal(this.app, async (q) => {
+        const hits = await this.retriever.retrieve(q);
+        console.log("检索结果：", hits);
+        new Notice(hits.map(h => `${h.score.toFixed(2)} ${h.path}`).join("\n") || "无命中");
+      }).open(),
     });
 
     this.registerEvent(this.app.vault.on("modify", (f) => {
@@ -57,4 +70,18 @@ export default class LearningTutorPlugin extends Plugin {
     data.index = this.store.serialize();
     await this.saveData(data);
   }
+}
+
+class QueryModal extends Modal {
+  constructor(app: App, private onSubmit: (q: string) => void) { super(app); }
+  onOpen() {
+    this.contentEl.createEl("h3", { text: "测试检索" });
+    const input = this.contentEl.createEl("input", { type: "text" });
+    input.style.width = "100%";
+    input.focus();
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && input.value.trim()) { this.close(); this.onSubmit(input.value.trim()); }
+    });
+  }
+  onClose() { this.contentEl.empty(); }
 }
