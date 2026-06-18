@@ -5,7 +5,7 @@ import path from "path";
 // 用 Node 拷贝而非 shell `cp`：npm 在 Windows 默认用 cmd 跑脚本，cmd 没有 cp。
 const dest =
   process.env.LT_VAULT_PLUGIN_DIR ||
-  "D:/Learning/Notes/人生一串/.obsidian/plugins/learning-tutor";
+  "D:/Learning/Notes/人生一串/.obsidian/plugins/cobrain";
 
 await mkdir(dest, { recursive: true });
 // 只拷构建产物与清单；data.json 是 vault 侧的用户数据（设置+索引），绝不覆盖

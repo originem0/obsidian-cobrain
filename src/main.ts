@@ -40,10 +40,10 @@ export default class LearningTutorPlugin extends Plugin {
     this.image = new ImageClient(this.settings);
 
     this.registerView(VIEW_TYPE_LT_CHAT, (leaf) => new ChatView(leaf, this));
-    this.addRibbonIcon("graduation-cap", "学习导师", () => this.activateChatView());
+    this.addRibbonIcon("brain", "创作副脑", () => this.activateChatView());
     this.addCommand({
       id: "lt-open-tutor",
-      name: "LT: 打开导师",
+      name: "LT: 打开创作副脑",
       callback: () => this.activateChatView(),
     });
 

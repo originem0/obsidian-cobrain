@@ -1,5 +1,6 @@
 import { Retriever } from "../rag/retriever";
 import { ChatClient, ChatMsg } from "../llm/chatClient";
+import type { QueryHit } from "../rag/vectorStore";
 import type { LTSettings } from "../settings";
 
 // 概念图详细度档位 → 给 LLM 的节点数指示
@@ -13,7 +14,7 @@ export class Tutor {
   // settings 引用：提示词、概念图方向/详细度等均在调用时读最新值（改设置即时生效）
   constructor(private retriever: Retriever, private chat: ChatClient, private settings: LTSettings) {}
 
-  private async retrieveContext(query: string): Promise<{ context: string; sources: string[] }> {
+  private async retrieveContext(query: string): Promise<{ context: string; sources: string[]; hits: QueryHit[] }> {
     try {
       const hits = await this.retriever.retrieve(query, 6);
       const sources = [...new Set(hits.map(h => h.path))];
@@ -21,15 +22,15 @@ export class Tutor {
         ? "已有笔记（从用户 vault 检索到的相关片段；据此判断用户已知什么，并用 [[路径]] 引用相关的）：\n" +
           hits.map(h => `- [${h.path}${h.heading ? " › " + h.heading : ""}]\n  ${h.text.slice(0, 300)}`).join("\n")
         : "";
-      return { context, sources };
+      return { context, sources, hits };
     } catch (e) {
       // 检索失败（如维度不一致）不阻断对话
-      return { context: `（检索暂不可用：${e instanceof Error ? e.message : String(e)}）`, sources: [] };
+      return { context: `（检索暂不可用：${e instanceof Error ? e.message : String(e)}）`, sources: [], hits: [] };
     }
   }
 
-  async ask(history: ChatMsg[], userMsg: string): Promise<{ reply: string; sources: string[] }> {
-    const { context, sources } = await this.retrieveContext(userMsg);
+  async ask(history: ChatMsg[], userMsg: string): Promise<{ reply: string; sources: string[]; related: QueryHit[] }> {
+    const { context, sources, hits } = await this.retrieveContext(userMsg);
     const messages: ChatMsg[] = [
       { role: "system", content: this.settings.tutorPrompt },
       ...(context ? [{ role: "system" as const, content: context }] : []),
@@ -37,7 +38,8 @@ export class Tutor {
       { role: "user", content: userMsg },
     ];
     const reply = await this.chat.chat(messages);
-    return { reply, sources };
+    // related = 检索命中的原始片段，交给 UI 显式呈现给用户（第二大脑「联想」效果），而非只喂给模型
+    return { reply, sources, related: hits };
   }
 
   // 概念图：让 LLM 产出 Mermaid（焦点问题→概念→关系）。方向/详细度由设置注入到提示词。
@@ -73,7 +75,7 @@ export class Tutor {
   // 把对话综述成结构化笔记（标题 + 正文），而非聊天记录原文
   async summarizeNote(history: ChatMsg[]): Promise<{ title: string; body: string }> {
     const convo = history
-      .map(m => `${m.role === "user" ? "用户" : "导师"}：${m.content}`)
+      .map(m => `${m.role === "user" ? "用户" : "副脑"}：${m.content}`)
       .join("\n\n");
     const reply = await this.chat.chat(
       [

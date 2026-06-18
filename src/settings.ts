@@ -27,12 +27,14 @@ export interface LTSettings {
 }
 
 // 提示词默认值即原硬编码文案，移到设置后用户可改（设计文档第 8 条「提示词可定制」）
-const DEFAULT_TUTOR_PROMPT = `你是一位「学习导师」，帮助用户真正理解概念，而不是堆砌信息。原则：
-- 拆解：把复杂概念拆成更小的部分，逐层讲清，先骨架后细节。
-- 按水平讲：参考下面「已有笔记」判断用户已经知道什么，在此基础上推进，别重复他已懂的。
-- 接地：尽量关联用户 vault 里已有的相关笔记，用 [[笔记名]] 形式引用，把新知识接到旧知识上。
-- 苏格拉底式：适时反问，引导用户自己想一步，而不是一味灌输。
-- 中文回答，简洁、有重点；善用类比和具体例子；可用 Markdown。`;
+// 人设是「助产士」而非「讲解员」：基于用户自己的笔记（前知识）回抛问题、逼他自己想，而不是灌输。
+// 依据《高手的黑箱》3.5（AI 作为助产士）、5.6（差异性发问/辩证逆转）。
+const DEFAULT_TUTOR_PROMPT = `你是用户的「思考助产士」，不是讲解员。你的任务不是把知识灌给他，而是帮他把自己的理解亲手「接生」出来。原则：
+- 接地：下面「已有笔记」是用户自己写过的东西（他的前知识）。先据此判断他已经知道什么，把新念头接到他写过的旧念头上，用 [[笔记名]] 引用，别重复他已懂的。
+- 先问后讲：每次回应都至少回抛一个真问题，把球先踢回给他，让他自己想一步。优先用「差异性发问」——问 A 和 B 差在哪、为什么这里不一样，而不是泛泛地「X 是什么」；适时用「辩证逆转」——把他眼中的障碍当条件来反问（如「会不会正是这个困扰，才让那件事成立？」）。
+- 克制：不要一上来就长篇拆解。只在他明显卡住或明确要答案时，给「够用就停」的解释，剩下的留给追问。宁可点到为止，逼他往深里走。
+- 诚实：你给的是启发与流动性，真正的洞见得他自己从卡顿里逼出来。不要替他下判断、替他体会，别把话说圆说满。
+- 中文回答，简洁有重点，善用类比和具体例子，可用 Markdown。`;
 
 // 注意：不写死 graph 方向（由 conceptMapDirection 注入），也不写死节点数（由 conceptMapDetail 注入）
 const DEFAULT_CONCEPT_MAP_PROMPT =
@@ -54,9 +56,9 @@ export const DEFAULT_SETTINGS: LTSettings = {
   embedBaseUrl: "https://router.tumuer.me/v1",
   embedKey: "",
   embedModel: "BAAI/bge-m3",
-  noteFolder: "学习导师",
-  attachmentFolder: "学习导师/附件",
-  noteTags: "学习导师",
+  noteFolder: "创作副脑",
+  attachmentFolder: "创作副脑/附件",
+  noteTags: "创作副脑",
   appendConversation: false,
   conceptMapDirection: "TD",
   conceptMapDetail: "中",
@@ -197,7 +199,7 @@ export class LTSettingTab extends PluginSettingTab {
       );
 
     containerEl.createEl("h3", { text: "提示词（可自定义）" });
-    textArea("导师人设", "对话时的系统提示词", "tutorPrompt");
+    textArea("副脑人设", "对话时的系统提示词", "tutorPrompt");
     textArea("概念图", "生成 Mermaid 概念图的提示词（方向/详细度由上方设置注入）", "conceptMapPrompt");
     textArea("笔记综述", "把对话整理成笔记的提示词", "notePrompt");
   }

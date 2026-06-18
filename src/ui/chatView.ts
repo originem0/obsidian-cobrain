@@ -1,5 +1,6 @@
 import { ItemView, WorkspaceLeaf, MarkdownRenderer, Notice, Modal, App } from "obsidian";
 import type { ChatMsg } from "../llm/chatClient";
+import type { QueryHit } from "../rag/vectorStore";
 import { saveNote, saveImage } from "../noteWriter";
 import type LearningTutorPlugin from "../main";
 
@@ -29,8 +30,8 @@ export class ChatView extends ItemView {
   }
 
   getViewType(): string { return VIEW_TYPE_LT_CHAT; }
-  getDisplayText(): string { return "学习导师"; }
-  getIcon(): string { return "graduation-cap"; }
+  getDisplayText(): string { return "创作副脑"; }
+  getIcon(): string { return "brain"; }
 
   async onOpen(): Promise<void> {
     const root = this.contentEl;
@@ -41,7 +42,7 @@ export class ChatView extends ItemView {
     this.messagesEl.style.cssText = "flex:1; overflow-y:auto; padding:8px;";
     const w = this.messagesEl.createDiv();
     w.style.cssText = "opacity:0.55; padding:8px; font-size:0.9em;";
-    w.setText("跟导师聊一个想搞懂的概念——它会检索你的 vault、按你的水平讲。下方按钮：把当前话题画成概念图 / 给概念配图 / 把对话存成结构化笔记。");
+    w.setText("跟它聊一个你正在想的东西——它会从你 vault 里翻出你写过的相关旧笔记摊到眼前，并回抛问题逼你自己想，而不是讲给你听。下方按钮：概念图 / 配图 / 存为笔记。");
 
     const bar = root.createDiv();
     bar.style.cssText =
@@ -54,7 +55,7 @@ export class ChatView extends ItemView {
     iw.style.cssText =
       "display:flex; gap:6px; padding:8px; border-top:1px solid var(--background-modifier-border);";
     this.inputEl = iw.createEl("textarea", {
-      attr: { rows: "2", placeholder: "问导师…（Enter 发送，Shift+Enter 换行）" },
+      attr: { rows: "2", placeholder: "问副脑…（Enter 发送，Shift+Enter 换行）" },
     });
     this.inputEl.style.cssText = "flex:1; resize:none;";
     this.sendBtn = iw.createEl("button", { text: "发送" });
@@ -78,7 +79,7 @@ export class ChatView extends ItemView {
     b.style.cssText = `margin:8px 0; padding:8px 10px; border-radius:8px; background:var(${
       role === "user" ? "--background-secondary" : "--background-primary-alt"
     });`;
-    const who = b.createEl("div", { text: role === "user" ? "你" : "导师" });
+    const who = b.createEl("div", { text: role === "user" ? "你" : "副脑" });
     who.style.cssText = "font-size:0.72em; opacity:0.55; margin-bottom:4px;";
     const body = b.createDiv();
     if (role === "assistant") void MarkdownRenderer.render(this.app, text, body, "", this);
@@ -89,6 +90,33 @@ export class ChatView extends ItemView {
     }
     this.messagesEl.scrollTop = this.messagesEl.scrollHeight;
     return b;
+  }
+
+  // 把检索命中的旧笔记显式列出来、可点开——让 vault 主动「撞」你，而不是悄悄喂给模型（第二大脑「联想」）
+  private addRelatedBlock(hits: QueryHit[]): void {
+    if (!hits.length) return;
+    const seen = new Set<string>();
+    const uniq = hits.filter(h => {
+      if (seen.has(h.path)) return false;
+      seen.add(h.path);
+      return true;
+    });
+    const wrap = this.messagesEl.createDiv();
+    wrap.style.cssText =
+      "margin:8px 0; padding:6px 10px; border-left:2px solid var(--interactive-accent); background:var(--background-secondary); border-radius:4px;";
+    const head = wrap.createEl("div", { text: "你写过的（点开撞一撞）" });
+    head.style.cssText = "font-size:0.72em; opacity:0.55; margin-bottom:4px;";
+    uniq.slice(0, 5).forEach(h => {
+      const item = wrap.createDiv();
+      item.style.cssText = "margin:3px 0; cursor:pointer;";
+      const title = (h.path.split("/").pop() ?? h.path).replace(/\.md$/, "") + (h.heading ? " › " + h.heading : "");
+      const t = item.createEl("div", { text: title });
+      t.style.cssText = "font-size:0.85em; color:var(--text-accent);";
+      const s = item.createEl("div", { text: h.text.slice(0, 80) + (h.text.length > 80 ? "…" : "") });
+      s.style.cssText = "font-size:0.78em; opacity:0.5;";
+      item.onclick = () => this.app.workspace.openLinkText(h.path, "", false);
+    });
+    this.messagesEl.scrollTop = this.messagesEl.scrollHeight;
   }
 
   private currentTopic(): string {
@@ -109,9 +137,11 @@ export class ChatView extends ItemView {
     this.addBubble("user", text);
     const thinking = this.addBubble("assistant", "思考中…");
     try {
-      const { reply, sources } = await this.plugin.tutor.ask(this.history, text);
+      const { reply, sources, related } = await this.plugin.tutor.ask(this.history, text);
       thinking.remove();
-      this.addBubble("assistant", reply, sources);
+      // 先把你自己写过的相关旧笔记摊到眼前（第二大脑「联想」），再看导师的回应
+      this.addRelatedBlock(related);
+      this.addBubble("assistant", reply);
       sources.forEach(s => this.sources.add(s));
       this.history.push({ role: "user", content: text }, { role: "assistant", content: reply });
       if (this.history.length > 20) this.history = this.history.slice(-20);
@@ -189,7 +219,7 @@ export class ChatView extends ItemView {
     try {
       const { title, body } = await this.plugin.tutor.summarizeNote(this.history);
       const conversation = this.plugin.settings.appendConversation
-        ? this.history.map(m => `**${m.role === "user" ? "你" : "导师"}**：${m.content}`).join("\n\n")
+        ? this.history.map(m => `**${m.role === "user" ? "你" : "副脑"}**：${m.content}`).join("\n\n")
         : null;
       const path = await saveNote(this.app, this.plugin.settings, {
         title,
