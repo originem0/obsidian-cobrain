@@ -1,15 +1,17 @@
 import { Retriever } from "../rag/retriever";
 import { ChatClient, ChatMsg } from "../llm/chatClient";
+import type { LTSettings } from "../settings";
 
-export const TUTOR_SYSTEM = `你是一位「学习导师」，帮助用户真正理解概念，而不是堆砌信息。原则：
-- 拆解：把复杂概念拆成更小的部分，逐层讲清，先骨架后细节。
-- 按水平讲：参考下面「已有笔记」判断用户已经知道什么，在此基础上推进，别重复他已懂的。
-- 接地：尽量关联用户 vault 里已有的相关笔记，用 [[笔记名]] 形式引用，把新知识接到旧知识上。
-- 苏格拉底式：适时反问，引导用户自己想一步，而不是一味灌输。
-- 中文回答，简洁、有重点；善用类比和具体例子；可用 Markdown。`;
+// 概念图详细度档位 → 给 LLM 的节点数指示
+const DETAIL_HINT: Record<string, string> = {
+  "简": "只画最核心的 5-7 个节点。",
+  "中": "约 10 个节点。",
+  "详": "尽量完整，15 个以上节点，包含次级关系。",
+};
 
 export class Tutor {
-  constructor(private retriever: Retriever, private chat: ChatClient) {}
+  // settings 引用：提示词、概念图方向/详细度等均在调用时读最新值（改设置即时生效）
+  constructor(private retriever: Retriever, private chat: ChatClient, private settings: LTSettings) {}
 
   private async retrieveContext(query: string): Promise<{ context: string; sources: string[] }> {
     try {
@@ -29,7 +31,7 @@ export class Tutor {
   async ask(history: ChatMsg[], userMsg: string): Promise<{ reply: string; sources: string[] }> {
     const { context, sources } = await this.retrieveContext(userMsg);
     const messages: ChatMsg[] = [
-      { role: "system", content: TUTOR_SYSTEM },
+      { role: "system", content: this.settings.tutorPrompt },
       ...(context ? [{ role: "system" as const, content: context }] : []),
       ...history,
       { role: "user", content: userMsg },
@@ -38,37 +40,47 @@ export class Tutor {
     return { reply, sources };
   }
 
-  // Plan2-T5 概念图：让 LLM 产出 Mermaid（焦点问题→概念→关系）
+  // 概念图：让 LLM 产出 Mermaid（焦点问题→概念→关系）。方向/详细度由设置注入到提示词。
   async conceptMap(topic: string): Promise<string> {
     const { context } = await this.retrieveContext(topic);
+    const dir = this.settings.conceptMapDirection || "TD";
+    const detail = DETAIL_HINT[this.settings.conceptMapDetail] ?? DETAIL_HINT["中"];
+    const system = `${this.settings.conceptMapPrompt}\n用 \`graph ${dir}\`。${detail}`;
+    return this.chat.chat(
+      [
+        { role: "system", content: system },
+        { role: "user", content: `主题：${topic}\n\n参考片段：\n${context}\n\n画出这个主题的概念图。` },
+      ],
+      { temperature: 0.3, maxTokens: 4096 },
+    );
+  }
+
+  // 把概念扩写成详细的文生图提示词。图像质量的根因在提示词太简陋，故先让 LLM 构想一个具象画面。
+  async imagePrompt(concept: string): Promise<string> {
     return this.chat.chat(
       [
         {
           role: "system",
           content:
-            "只输出一个 ```mermaid 代码块，不要任何其它文字。用 `graph TD`：顶部一个焦点问题节点，往下是核心概念，用带中文标签的箭头表示概念间关系。节点文字用中文，简短。",
+            "你是文生图提示词专家。把用户给的概念转化为一段用于图像生成模型的提示词：构想一个能隐喻该概念核心的具体画面，描述主体、场景、动作、构图、光线、色调，尽量具象可画，避免抽象词汇。只输出提示词本身，不要解释、不要加引号。",
         },
-        { role: "user", content: `主题：${topic}\n\n参考片段：\n${context}\n\n画出这个主题的概念图。` },
+        { role: "user", content: `概念：${concept}` },
       ],
-      { temperature: 0.3 },
+      { temperature: 0.8, maxTokens: 600 },
     );
   }
 
-  // Plan2-T4：把对话综述成结构化笔记（标题 + 正文），而非聊天记录原文
+  // 把对话综述成结构化笔记（标题 + 正文），而非聊天记录原文
   async summarizeNote(history: ChatMsg[]): Promise<{ title: string; body: string }> {
     const convo = history
       .map(m => `${m.role === "user" ? "用户" : "导师"}：${m.content}`)
       .join("\n\n");
     const reply = await this.chat.chat(
       [
-        {
-          role: "system",
-          content:
-            "把下面这段学习对话整理成一篇结构化的中文笔记（不是聊天记录原文）。第一行用 `标题：xxx` 给出简短标题；其后是正文：用小标题和要点组织核心概念、拆解与结论，去掉寒暄口水。Markdown 格式。",
-        },
+        { role: "system", content: this.settings.notePrompt },
         { role: "user", content: convo },
       ],
-      { temperature: 0.3 },
+      { temperature: 0.3, maxTokens: 4096 },
     );
     const m = reply.match(/^标题[：:]\s*(.+)$/m);
     const title = m ? m[1].trim() : "学习笔记";

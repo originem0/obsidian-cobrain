@@ -1,5 +1,6 @@
 import { requestUrl } from "obsidian";
 import type { Embedder } from "./embedder";
+import type { LTSettings } from "../settings";
 
 // L2 归一化：向量库用点积当 cosine（topK 约定向量已归一化），故这里统一归一化。
 function normalize(v: number[]): number[] {
@@ -9,35 +10,43 @@ function normalize(v: number[]): number[] {
   return v.map(x => x / n);
 }
 
-// OpenAI 兼容的云端 embeddings。用 Obsidian requestUrl（免 CORS）异步调用，
-// 不占用主线程 → 索引时不卡 UI；比本地 wasm 快且质量更好。
+function sleep(ms: number): Promise<void> {
+  return new Promise(r => setTimeout(r, ms));
+}
+
+// OpenAI 兼容的云端 embeddings。用 Obsidian requestUrl（免 CORS）异步调用，不占用主线程。
+// 持有 settings 引用，调用时读最新 baseUrl/key/model（改设置即时生效）。
 export class ApiEmbedder implements Embedder {
   dim: number | null = null;
 
-  constructor(
-    private baseUrl: string,
-    private apiKey: string,
-    private model: string,
-  ) {}
+  constructor(private settings: LTSettings) {}
 
   private async embed(inputs: string[]): Promise<number[][]> {
-    const url = `${this.baseUrl.replace(/\/+$/, "")}/embeddings`;
-    const res = await requestUrl({
-      url,
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${this.apiKey}` },
-      body: JSON.stringify({ model: this.model, input: inputs }),
-      throw: false,
-    });
-    if (res.status !== 200) {
-      throw new Error(`embeddings API ${res.status}: ${(res.text || "").slice(0, 200)}`);
+    const url = `${this.settings.embedBaseUrl.replace(/\/+$/, "")}/embeddings`;
+    const maxRetries = 3;
+    for (let attempt = 0; ; attempt++) {
+      const res = await requestUrl({
+        url,
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${this.settings.embedKey}` },
+        body: JSON.stringify({ model: this.settings.embedModel, input: inputs }),
+        throw: false,
+      });
+      if (res.status === 200) {
+        const data = (res.json.data as { embedding: number[]; index: number }[])
+          .slice()
+          .sort((a, b) => a.index - b.index);
+        const vecs = data.map(d => normalize(d.embedding));
+        if (vecs[0]) this.dim = vecs[0].length;
+        return vecs;
+      }
+      // 429（限流）/ 5xx（服务端抖动）退避重试；其它 4xx 是请求本身的问题，重试无意义，直接抛
+      const retryable = res.status === 429 || res.status >= 500;
+      if (!retryable || attempt >= maxRetries) {
+        throw new Error(`embeddings API ${res.status}: ${(res.text || "").slice(0, 200)}`);
+      }
+      await sleep(1000 * 2 ** attempt); // 1s → 2s → 4s
     }
-    const data = (res.json.data as { embedding: number[]; index: number }[])
-      .slice()
-      .sort((a, b) => a.index - b.index);
-    const vecs = data.map(d => normalize(d.embedding));
-    if (vecs[0]) this.dim = vecs[0].length;
-    return vecs;
   }
 
   async embedDocuments(texts: string[]): Promise<number[][]> {

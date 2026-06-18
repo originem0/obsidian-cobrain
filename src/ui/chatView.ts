@@ -21,6 +21,8 @@ export class ChatView extends ItemView {
   private lastImageEmbed: string | null = null;
   private messagesEl!: HTMLElement;
   private inputEl!: HTMLTextAreaElement;
+  private sendBtn!: HTMLButtonElement;
+  private busy = false; // 一次只跑一轮 ask，避免连发导致 history 交错
 
   constructor(leaf: WorkspaceLeaf, private plugin: LearningTutorPlugin) {
     super(leaf);
@@ -55,8 +57,8 @@ export class ChatView extends ItemView {
       attr: { rows: "2", placeholder: "问导师…（Enter 发送，Shift+Enter 换行）" },
     });
     this.inputEl.style.cssText = "flex:1; resize:none;";
-    const send = iw.createEl("button", { text: "发送" });
-    send.onclick = () => void this.send();
+    this.sendBtn = iw.createEl("button", { text: "发送" });
+    this.sendBtn.onclick = () => void this.send();
     this.inputEl.addEventListener("keydown", e => {
       if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
@@ -97,8 +99,12 @@ export class ChatView extends ItemView {
   }
 
   private async send(): Promise<void> {
+    if (this.busy) return;
     const text = this.inputEl.value.trim();
     if (!text) return;
+    this.busy = true;
+    this.inputEl.disabled = true;
+    this.sendBtn.disabled = true;
     this.inputEl.value = "";
     this.addBubble("user", text);
     const thinking = this.addBubble("assistant", "思考中…");
@@ -112,6 +118,11 @@ export class ChatView extends ItemView {
     } catch (e) {
       thinking.remove();
       this.addBubble("assistant", "出错了：" + errMsg(e));
+    } finally {
+      this.busy = false;
+      this.inputEl.disabled = false;
+      this.sendBtn.disabled = false;
+      this.inputEl.focus();
     }
   }
 
@@ -133,21 +144,39 @@ export class ChatView extends ItemView {
     }
   }
 
+  // 配图两步：选概念 → LLM 把概念扩写成详细视觉提示词 → 用户编辑确认 → 出图。
+  // 根因（提示词太简陋 + currentTopic 常是整句话）在扩写 + 可编辑这两步被收敛。
   private doImage(): void {
     new PromptModal(this.app, "给哪个概念配图？", this.currentTopic(), async concept => {
       if (!concept) return;
-      const bubble = this.addBubble("assistant", `为「${concept}」配图中…（图像生成较慢，约 1 分钟，请稍候）`);
+      const notice = new Notice("扩写配图提示词中…", 0);
+      let scene: string;
       try {
-        const prompt = `为「${concept}」这一概念创作一张帮助理解记忆的插画：用具象、生动、略带夸张的视觉隐喻表现其核心含义；画面简洁、有冲击力；不要出现文字。`;
-        const buf = await this.plugin.image.generate(prompt);
-        const path = await saveImage(this.app, this.plugin.settings, buf);
-        this.lastImageEmbed = `![[${path}]]`;
-        bubble.remove();
-        this.addBubble("assistant", `「${concept}」配图：\n\n${this.lastImageEmbed}`);
+        scene = await this.plugin.tutor.imagePrompt(concept);
       } catch (e) {
-        bubble.remove();
-        this.addBubble("assistant", "配图失败：" + errMsg(e));
+        notice.hide();
+        new Notice("提示词扩写失败：" + errMsg(e));
+        return;
       }
+      notice.hide();
+      const style = this.plugin.settings.imageStyle;
+      const fullPrompt = [scene.trim(), style ? `风格：${style}` : "", "画面中不要出现任何文字。"]
+        .filter(Boolean)
+        .join("\n\n");
+      new TextAreaModal(this.app, "确认 / 编辑配图提示词", fullPrompt, async finalPrompt => {
+        if (!finalPrompt) return;
+        const bubble = this.addBubble("assistant", `为「${concept}」配图中…（图像生成较慢，约 1 分钟，请稍候）`);
+        try {
+          const buf = await this.plugin.image.generate(finalPrompt);
+          const path = await saveImage(this.app, this.plugin.settings, buf);
+          this.lastImageEmbed = `![[${path}]]`;
+          bubble.remove();
+          this.addBubble("assistant", `「${concept}」配图：\n\n${this.lastImageEmbed}`);
+        } catch (e) {
+          bubble.remove();
+          this.addBubble("assistant", "配图失败：" + errMsg(e));
+        }
+      }).open();
     }).open();
   }
 
@@ -159,12 +188,16 @@ export class ChatView extends ItemView {
     const notice = new Notice("整理成笔记中…", 0);
     try {
       const { title, body } = await this.plugin.tutor.summarizeNote(this.history);
+      const conversation = this.plugin.settings.appendConversation
+        ? this.history.map(m => `**${m.role === "user" ? "你" : "导师"}**：${m.content}`).join("\n\n")
+        : null;
       const path = await saveNote(this.app, this.plugin.settings, {
         title,
         body,
         sources: [...this.sources],
         mermaid: this.lastMermaid,
         imageEmbed: this.lastImageEmbed,
+        conversation,
       });
       notice.hide();
       new Notice("已保存：" + path);
@@ -204,6 +237,34 @@ class PromptModal extends Modal {
     const btn = this.contentEl.createEl("button", { text: "确定" });
     btn.style.marginTop = "8px";
     btn.onclick = submit;
+  }
+  onClose(): void {
+    this.contentEl.empty();
+  }
+}
+
+// 多行可编辑弹窗：用于出图前确认 / 编辑配图提示词
+class TextAreaModal extends Modal {
+  constructor(
+    app: App,
+    private titleText: string,
+    private initial: string,
+    private onSubmit: (v: string) => void,
+  ) {
+    super(app);
+  }
+  onOpen(): void {
+    this.contentEl.createEl("h3", { text: this.titleText });
+    const ta = this.contentEl.createEl("textarea");
+    ta.value = this.initial;
+    ta.style.cssText = "width:100%; height:160px; resize:vertical;";
+    ta.focus();
+    const btn = this.contentEl.createEl("button", { text: "生成" });
+    btn.style.marginTop = "8px";
+    btn.onclick = () => {
+      this.close();
+      this.onSubmit(ta.value.trim());
+    };
   }
   onClose(): void {
     this.contentEl.empty();

@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "node esbuild.config.mjs",
     "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
+    "deploy": "npm run build && node deploy.mjs",
     "test": "jest"
   },
   "devDependencies": {
@@ -16,7 +17,5 @@
     "ts-jest": "^29.1.4",
     "typescript": "^5.4.5"
   },
-  "dependencies": {
-    "@huggingface/transformers": "^3.0.2"
-  }
+  "dependencies": {}
 }

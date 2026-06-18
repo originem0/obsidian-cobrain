@@ -17,6 +17,8 @@ export default class LearningTutorPlugin extends Plugin {
   retriever!: Retriever;
   tutor!: Tutor;
   image!: ImageClient;
+  // 按路径防抖「modify → 嵌入」的定时器，避免编辑期间反复触发 modify 反复打嵌入接口
+  private modifyTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
   async onload() {
     await this.loadSettings();
@@ -30,12 +32,12 @@ export default class LearningTutorPlugin extends Plugin {
       this.store.deserialize(null);
       new Notice("嵌入模型已变更，旧索引已清空，请重新「LT: 重建索引」");
     }
-    this.embedder = new ApiEmbedder(this.settings.embedBaseUrl, this.settings.embedKey, this.settings.embedModel);
+    this.embedder = new ApiEmbedder(this.settings);
     this.indexer = new Indexer(this.app, this.embedder, this.store);
     this.retriever = new Retriever(this.embedder, this.store);
-    const chatClient = new ChatClient(this.settings.llmBaseUrl, this.settings.llmKey, this.settings.llmModel);
-    this.tutor = new Tutor(this.retriever, chatClient);
-    this.image = new ImageClient(this.settings.imageBaseUrl, this.settings.imageKey, this.settings.imageModel);
+    const chatClient = new ChatClient(this.settings);
+    this.tutor = new Tutor(this.retriever, chatClient, this.settings);
+    this.image = new ImageClient(this.settings);
 
     this.registerView(VIEW_TYPE_LT_CHAT, (leaf) => new ChatView(leaf, this));
     this.addRibbonIcon("graduation-cap", "学习导师", () => this.activateChatView());
@@ -61,10 +63,12 @@ export default class LearningTutorPlugin extends Plugin {
     });
 
     this.registerEvent(this.app.vault.on("modify", (f) => {
-      if (f instanceof TFile && f.extension === "md")
-        this.indexer.onModify(f).then(() => this.persistIndex());
+      if (f instanceof TFile && f.extension === "md") this.scheduleReindex(f);
     }));
     this.registerEvent(this.app.vault.on("delete", (f) => {
+      // 文件在防抖窗口内被删：清掉待嵌入定时器，否则会把已删文件重新嵌回索引
+      const t = this.modifyTimers.get(f.path);
+      if (t) { clearTimeout(t); this.modifyTimers.delete(f.path); }
       this.indexer.onDelete(f.path);
       this.persistIndex();
     }));
@@ -90,6 +94,24 @@ export default class LearningTutorPlugin extends Plugin {
     // 直接整体写入，不再 loadData 读一遍（避免索引增大后每次持久化的 O(n²) I/O）
     // 记录嵌入模型，换模型时据此判断旧索引失效
     await this.saveData({ settings: this.settings, index: this.store.serialize(), embedModel: this.settings.embedModel });
+  }
+
+  // 防抖重嵌：编辑停顿约 2.5s 才嵌入变更文件。失败冒泡为 Notice，不再静默吞掉（旧代码无 catch）。
+  private scheduleReindex(file: TFile): void {
+    const prev = this.modifyTimers.get(file.path);
+    if (prev) clearTimeout(prev);
+    this.modifyTimers.set(
+      file.path,
+      setTimeout(() => {
+        this.modifyTimers.delete(file.path);
+        this.indexer
+          .onModify(file)
+          .then(() => this.persistIndex())
+          .catch((e) =>
+            new Notice(`索引更新失败：${file.path}：${e instanceof Error ? e.message : String(e)}`),
+          );
+      }, 2500),
+    );
   }
 
   async activateChatView(): Promise<void> {

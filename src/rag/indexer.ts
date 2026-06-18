@@ -30,10 +30,17 @@ export class Indexer {
       if (!present.has(p)) this.store.removeFile(p);
     }
     let done = 0;
+    let failed = 0;
     const notice = new Notice("索引中… 0/" + files.length, 0);
     for (const f of files) {
       if (this.store.getMtime(f.path) !== f.stat.mtime) {
-        await this.indexFile(f);
+        try {
+          await this.indexFile(f);
+        } catch (e) {
+          // 单篇失败（如嵌入 API 抖动）不该中断整个重建；记数继续，结束时汇报
+          failed++;
+          console.error(`索引失败：${f.path}`, e);
+        }
       }
       done++;
       notice.setMessage(`索引中… ${done}/${files.length}`);
@@ -42,7 +49,9 @@ export class Indexer {
       }
     }
     notice.hide();
-    new Notice(`索引完成：${files.length} 篇`);
+    new Notice(
+      failed ? `索引完成：${files.length} 篇，${failed} 篇失败（见控制台）` : `索引完成：${files.length} 篇`,
+    );
   }
 
   // 增量：单文件变更/删除

@@ -7,6 +7,7 @@ export interface NotePayload {
   sources: string[];
   mermaid?: string | null;
   imageEmbed?: string | null;
+  conversation?: string | null; // 原始对话（appendConversation 开启时附在末尾）
 }
 
 function sanitize(name: string): string {
@@ -25,12 +26,19 @@ export async function saveNote(app: App, settings: LTSettings, p: NotePayload): 
   await ensureFolder(app, folder);
 
   const date = new Date().toISOString().slice(0, 10);
-  const parts: string[] = ["---", `created: ${date}`, "tags: [学习导师]", "---", "", `# ${p.title}`, "", p.body, ""];
+  // 标签来自设置（中/英文逗号分隔）；空则不写 tags
+  const tags = (settings.noteTags || "").split(/[，,]/).map(t => t.trim()).filter(Boolean);
+  const parts: string[] = ["---", `created: ${date}`];
+  if (tags.length) parts.push(`tags: [${tags.join(", ")}]`);
+  parts.push("---", "", `# ${p.title}`, "", p.body, "");
   if (p.mermaid) parts.push(p.mermaid, "");
   if (p.imageEmbed) parts.push(p.imageEmbed, "");
   if (p.sources?.length) {
     parts.push("## 相关笔记", "");
     for (const s of p.sources) parts.push(`- [[${s.replace(/\.md$/, "")}]]`);
+  }
+  if (p.conversation) {
+    parts.push("", "## 原始对话", "", p.conversation);
   }
   const content = parts.join("\n");
 
