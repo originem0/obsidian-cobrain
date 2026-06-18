@@ -24,7 +24,7 @@ export const DEFAULT_SETTINGS: LTSettings = {
   imageModel: "gpt-image-2",
   embedBaseUrl: "https://router.tumuer.me/v1",
   embedKey: "",
-  embedModel: "text-embedding-3-small",
+  embedModel: "BAAI/bge-m3",
   noteFolder: "学习导师",
   attachmentFolder: "学习导师/附件",
 };
