@@ -1,7 +1,7 @@
 import { Plugin, Notice, TFile, Modal, App } from "obsidian";
 import { LTSettings, DEFAULT_SETTINGS, LTSettingTab } from "./settings";
 import { ApiEmbedder } from "./rag/apiEmbedder";
-import { VectorStore } from "./rag/vectorStore";
+import { VectorStore, type QueryHit } from "./rag/vectorStore";
 import { Indexer } from "./rag/indexer";
 import { Retriever } from "./rag/retriever";
 
@@ -38,9 +38,8 @@ export default class LearningTutorPlugin extends Plugin {
       id: "lt-test-retrieval",
       name: "LT: 测试检索",
       callback: () => new QueryModal(this.app, async (q) => {
-        const hits = await this.retriever.retrieve(q);
-        console.log("检索结果：", hits);
-        new Notice(hits.map(h => `${h.score.toFixed(2)} ${h.path}`).join("\n") || "无命中");
+        const hits = await this.retriever.retrieve(q, 8);
+        new ResultsModal(this.app, q, hits).open();
       }).open(),
     });
 
@@ -97,6 +96,34 @@ class QueryModal extends Modal {
     input.focus();
     input.addEventListener("keydown", (e) => {
       if (e.key === "Enter" && input.value.trim()) { this.close(); this.onSubmit(input.value.trim()); }
+    });
+  }
+  onClose() { this.contentEl.empty(); }
+}
+
+// 检索结果弹窗：展示分数 + 路径 + 标题 + 正文片段，便于人工判断检索质量
+class ResultsModal extends Modal {
+  constructor(app: App, private query: string, private hits: QueryHit[]) { super(app); }
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.createEl("h3", { text: `检索：${this.query}` });
+    if (!this.hits.length) {
+      contentEl.createEl("p", { text: "无命中（索引为空？先「LT: 重建索引」）" });
+      return;
+    }
+    this.hits.forEach((h, i) => {
+      const div = contentEl.createDiv();
+      div.style.margin = "0 0 12px";
+      const head = div.createEl("div", {
+        text: `${i + 1}. ${h.score.toFixed(3)} · ${h.path}${h.heading ? " › " + h.heading : ""}`,
+      });
+      head.style.fontWeight = "600";
+      const body = div.createEl("div", {
+        text: h.text.slice(0, 220) + (h.text.length > 220 ? "…" : ""),
+      });
+      body.style.opacity = "0.7";
+      body.style.fontSize = "0.85em";
+      body.style.marginTop = "2px";
     });
   }
   onClose() { this.contentEl.empty(); }
