@@ -9,7 +9,9 @@ const ctx = await esbuild.context({
   external: ["obsidian", "electron", "@codemirror/*", "@lezer/*"],
   format: "cjs",
   target: "es2020",
-  platform: "node",
+  // transformers.js 走 onnxruntime-web(wasm)：onnxruntime-node 的原生 .node 绑定无法被 esbuild 打包；
+  // 且 Obsidian 渲染进程是 Chromium，browser 平台适配 wasm 后端。wasm 与模型首次运行时从 CDN 下载。
+  platform: "browser",
   sourcemap: prod ? false : "inline",
   treeShaking: true,
   outfile: "main.js",
