@@ -53,4 +53,26 @@ export class Tutor {
       { temperature: 0.3 },
     );
   }
+
+  // Plan2-T4：把对话综述成结构化笔记（标题 + 正文），而非聊天记录原文
+  async summarizeNote(history: ChatMsg[]): Promise<{ title: string; body: string }> {
+    const convo = history
+      .map(m => `${m.role === "user" ? "用户" : "导师"}：${m.content}`)
+      .join("\n\n");
+    const reply = await this.chat.chat(
+      [
+        {
+          role: "system",
+          content:
+            "把下面这段学习对话整理成一篇结构化的中文笔记（不是聊天记录原文）。第一行用 `标题：xxx` 给出简短标题；其后是正文：用小标题和要点组织核心概念、拆解与结论，去掉寒暄口水。Markdown 格式。",
+        },
+        { role: "user", content: convo },
+      ],
+      { temperature: 0.3 },
+    );
+    const m = reply.match(/^标题[：:]\s*(.+)$/m);
+    const title = m ? m[1].trim() : "学习笔记";
+    const body = reply.replace(/^标题[：:]\s*.+$/m, "").trim();
+    return { title, body };
+  }
 }

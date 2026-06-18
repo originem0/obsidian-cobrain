@@ -7,6 +7,7 @@ import { Retriever } from "./rag/retriever";
 import { ChatClient } from "./llm/chatClient";
 import { Tutor } from "./tutor/tutor";
 import { ChatView, VIEW_TYPE_LT_CHAT } from "./ui/chatView";
+import { ImageClient } from "./llm/imageClient";
 
 export default class LearningTutorPlugin extends Plugin {
   settings!: LTSettings;
@@ -15,6 +16,7 @@ export default class LearningTutorPlugin extends Plugin {
   indexer!: Indexer;
   retriever!: Retriever;
   tutor!: Tutor;
+  image!: ImageClient;
 
   async onload() {
     await this.loadSettings();
@@ -33,6 +35,7 @@ export default class LearningTutorPlugin extends Plugin {
     this.retriever = new Retriever(this.embedder, this.store);
     const chatClient = new ChatClient(this.settings.llmBaseUrl, this.settings.llmKey, this.settings.llmModel);
     this.tutor = new Tutor(this.retriever, chatClient);
+    this.image = new ImageClient(this.settings.imageBaseUrl, this.settings.imageKey, this.settings.imageModel);
 
     this.registerView(VIEW_TYPE_LT_CHAT, (leaf) => new ChatView(leaf, this));
     this.addRibbonIcon("graduation-cap", "学习导师", () => this.activateChatView());
