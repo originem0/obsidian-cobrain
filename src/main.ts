@@ -112,9 +112,16 @@ export default class CobrainPlugin extends Plugin {
 
   // 启动加载索引：优先读 index.json；不存在则尝试从旧版 data.json.index 一次性迁移并剥离。
   private async loadIndex(): Promise<void> {
-    type IndexPayload = ReturnType<VectorStore["serialize"]> & { embedModel?: string };
+    // 宽松结构：既能装下 v2 序列化输出，也能装下迁移自旧 data.json.index 的旧格式
+    type IndexFile = {
+      v?: number;
+      entries?: unknown[];
+      mtimes?: Record<string, number>;
+      hashes?: Record<string, string>;
+      embedModel?: string;
+    };
     const path = this.indexPath();
-    let payload: IndexPayload | null = null;
+    let payload: IndexFile | null = null;
     if (await this.app.vault.adapter.exists(path)) {
       try {
         payload = JSON.parse(await this.app.vault.adapter.read(path));

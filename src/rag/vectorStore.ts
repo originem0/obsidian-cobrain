@@ -1,8 +1,11 @@
 import { topK } from "./vectorMath";
+import { quantizeVector, dequantizeVector } from "../util/quantize";
 
 export interface Entry { path: string; chunkIdx: number; text: string; heading: string; vector: number[]; }
 export interface QueryHit { path: string; text: string; heading: string; score: number; }
 interface ChunkInput { text: string; heading: string; vector: number[]; }
+// 磁盘存储格式：向量量化为 int8(base64)，体积约为 float64 JSON 的 1/15
+interface StoredEntry { path: string; chunkIdx: number; text: string; heading: string; scale: number; q: string; }
 
 export class VectorStore {
   private entries: Entry[] = [];
@@ -59,14 +62,29 @@ export class VectorStore {
     });
   }
 
-  serialize(): { entries: Entry[]; mtimes: Record<string, number>; hashes: Record<string, string> } {
-    return { entries: this.entries, mtimes: this.mtimes, hashes: this.hashes };
+  serialize(): { v: number; entries: StoredEntry[]; mtimes: Record<string, number>; hashes: Record<string, string> } {
+    const entries = this.entries.map((e): StoredEntry => {
+      const { scale, q } = quantizeVector(e.vector);
+      return { path: e.path, chunkIdx: e.chunkIdx, text: e.text, heading: e.heading, scale, q };
+    });
+    return { v: 2, entries, mtimes: this.mtimes, hashes: this.hashes };
   }
 
+  // 兼容两种 entry：带 q(base64) 是 v2 量化格式，反量化回 float；带 vector(数组) 是旧 float64，直接用。
   deserialize(
-    data: { entries: Entry[]; mtimes: Record<string, number>; hashes?: Record<string, string> } | null,
+    data: { entries?: unknown[]; mtimes?: Record<string, number>; hashes?: Record<string, string> } | null,
   ): void {
-    this.entries = data?.entries ?? [];
+    const raw = (data?.entries ?? []) as Array<Record<string, unknown>>;
+    this.entries = raw.map((e): Entry => ({
+      path: e.path as string,
+      chunkIdx: e.chunkIdx as number,
+      text: e.text as string,
+      heading: e.heading as string,
+      vector:
+        typeof e.q === "string"
+          ? dequantizeVector(e.scale as number, e.q)
+          : ((e.vector as number[]) ?? []),
+    }));
     this.mtimes = data?.mtimes ?? {};
     this.hashes = data?.hashes ?? {};
   }
