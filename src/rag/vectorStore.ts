@@ -26,6 +26,13 @@ export class VectorStore {
   }
 
   query(vector: number[], k: number): QueryHit[] {
+    // 维度守卫：查询向量与索引向量维度不一致 → 换过模型但没重建索引。
+    // 不拦截的话点积会算出垃圾且不报错（曾踩过这个坑）。
+    if (this.entries.length && this.entries[0].vector.length !== vector.length) {
+      throw new Error(
+        `嵌入维度不一致：查询 ${vector.length} 维，索引 ${this.entries[0].vector.length} 维。请运行「LT: 重建索引」`,
+      );
+    }
     const scored = topK(
       vector,
       this.entries.map(e => ({ id: `${e.path}#${e.chunkIdx}`, vector: e.vector })),
