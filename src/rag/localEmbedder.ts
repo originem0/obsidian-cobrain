@@ -13,13 +13,23 @@ export class LocalEmbedder implements Embedder {
   ) {
     // 允许从 HF CDN 拉取模型；首次使用时下载并缓存
     env.allowRemoteModels = true;
+    // Obsidian/Electron 会被误判为 Node → 选到空壳 onnxruntime-node。强制 wasm 后端可用：
+    const wasm = (env.backends as any)?.onnx?.wasm;
+    if (wasm) {
+      wasm.numThreads = 1; // 单线程，免 SharedArrayBuffer（Obsidian 无跨源隔离）
+      wasm.wasmPaths =
+        "https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.8.1/dist/";
+    }
   }
 
   private async ensure(): Promise<void> {
     if (this.extractor) return;
     if (!this.loading) {
       this.loading = (async () => {
-        this.extractor = await pipeline("feature-extraction", this.modelId);
+        this.extractor = await pipeline("feature-extraction", this.modelId, {
+          device: "wasm",
+          dtype: "fp32",
+        });
       })();
     }
     await this.loading;

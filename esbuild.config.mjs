@@ -7,6 +7,9 @@ const ctx = await esbuild.context({
   bundle: true,
   // obsidian/electron 由宿主提供；transformers 体积大但需打进 bundle
   external: ["obsidian", "electron", "@codemirror/*", "@lezer/*"],
+  // transformers 在 Electron 渲染进程会误选 onnxruntime-node（被 browser 字段打成空壳）；
+  // 别名到 onnxruntime-web，强制所有 onnx 调用走 wasm 后端。
+  alias: { "onnxruntime-node": "onnxruntime-web" },
   format: "cjs",
   target: "es2020",
   // transformers.js 走 onnxruntime-web(wasm)：onnxruntime-node 的原生 .node 绑定无法被 esbuild 打包；
