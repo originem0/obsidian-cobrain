@@ -17,10 +17,14 @@ const forceTransformersWebEnv = {
     build.onLoad({ filter: /transformers\.web\.js$/ }, async (args) => {
       const src = await readFile(args.path, "utf8");
       const needle = "process?.release?.name === 'node'";
-      const patched = src.split(needle).join("false");
+      let patched = src.split(needle).join("false");
       const n = (src.length - patched.length) / (needle.length - "false".length);
-      console.log(`[force-web] IS_NODE_ENV 强制 false：替换 ${n} 处`);
       if (n === 0) throw new Error("[force-web] 未找到 node 检测字符串，transformers 版本可能已变");
+      // 强制 onnxruntime-web 单线程：否则加载多线程 wasm glue，其 import('worker_threads') 在渲染进程解析失败
+      const proxyLine = "ONNX_ENV.wasm.proxy = false";
+      if (!patched.includes(proxyLine)) throw new Error("[force-web] 未找到 ONNX_ENV.wasm.proxy，无法注入 numThreads");
+      patched = patched.replace(proxyLine, proxyLine + "; ONNX_ENV.wasm.numThreads = 1");
+      console.log(`[force-web] IS_NODE_ENV→false（${n} 处）；已注入 wasm.numThreads=1`);
       return { contents: patched, loader: "js" };
     });
   },
