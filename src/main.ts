@@ -4,6 +4,9 @@ import { ApiEmbedder } from "./rag/apiEmbedder";
 import { VectorStore, type QueryHit } from "./rag/vectorStore";
 import { Indexer } from "./rag/indexer";
 import { Retriever } from "./rag/retriever";
+import { ChatClient } from "./llm/chatClient";
+import { Tutor } from "./tutor/tutor";
+import { ChatView, VIEW_TYPE_LT_CHAT } from "./ui/chatView";
 
 export default class LearningTutorPlugin extends Plugin {
   settings!: LTSettings;
@@ -11,6 +14,7 @@ export default class LearningTutorPlugin extends Plugin {
   embedder!: ApiEmbedder;
   indexer!: Indexer;
   retriever!: Retriever;
+  tutor!: Tutor;
 
   async onload() {
     await this.loadSettings();
@@ -27,6 +31,16 @@ export default class LearningTutorPlugin extends Plugin {
     this.embedder = new ApiEmbedder(this.settings.embedBaseUrl, this.settings.embedKey, this.settings.embedModel);
     this.indexer = new Indexer(this.app, this.embedder, this.store);
     this.retriever = new Retriever(this.embedder, this.store);
+    const chatClient = new ChatClient(this.settings.llmBaseUrl, this.settings.llmKey, this.settings.llmModel);
+    this.tutor = new Tutor(this.retriever, chatClient);
+
+    this.registerView(VIEW_TYPE_LT_CHAT, (leaf) => new ChatView(leaf, this));
+    this.addRibbonIcon("graduation-cap", "学习导师", () => this.activateChatView());
+    this.addCommand({
+      id: "lt-open-tutor",
+      name: "LT: 打开导师",
+      callback: () => this.activateChatView(),
+    });
 
     this.addCommand({
       id: "lt-reindex",
@@ -75,15 +89,14 @@ export default class LearningTutorPlugin extends Plugin {
     await this.saveData({ settings: this.settings, index: this.store.serialize(), embedModel: this.settings.embedModel });
   }
 
-  // 把随插件分发的 patched glue + wasm 所在目录转成 onnxruntime-web 可用的 app:// 前缀。
-  // 必须用字符串前缀（而非对象）——ORT 用 wasmPaths 前缀拼 .mjs 文件名；对象形式它只认 .wasm，
-  // .mjs 会退回默认 base（app://obsidian.md/）导致 404。
-  loadOrtWasmPrefix(): string | undefined {
-    const dir = this.manifest.dir;
-    if (!dir) return undefined;
-    // getResourcePath 返回 app://<hash>/<绝对路径>?<ver>，去掉文件名与查询串得到目录前缀
-    const res = this.app.vault.adapter.getResourcePath(`${dir}/ort-wasm-simd-threaded.jsep.wasm`);
-    return res.replace(/ort-wasm-simd-threaded\.jsep\.wasm.*$/, "");
+  async activateChatView(): Promise<void> {
+    const { workspace } = this.app;
+    let leaf = workspace.getLeavesOfType(VIEW_TYPE_LT_CHAT)[0];
+    if (!leaf) {
+      leaf = workspace.getRightLeaf(false)!;
+      await leaf.setViewState({ type: VIEW_TYPE_LT_CHAT, active: true });
+    }
+    workspace.revealLeaf(leaf);
   }
 }
 
