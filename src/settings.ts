@@ -8,6 +8,8 @@ export interface LTSettings {
   imageBaseUrl: string;
   imageKey: string;
   imageModel: string;
+  embedBaseUrl: string;
+  embedKey: string;
   embedModel: string;
   noteFolder: string;
   attachmentFolder: string;
@@ -20,7 +22,9 @@ export const DEFAULT_SETTINGS: LTSettings = {
   imageBaseUrl: "https://freeapi.dgbmc.top/v1",
   imageKey: "",
   imageModel: "gpt-image-2",
-  embedModel: "Xenova/multilingual-e5-small",
+  embedBaseUrl: "https://router.tumuer.me/v1",
+  embedKey: "",
+  embedModel: "text-embedding-3-small",
   noteFolder: "学习导师",
   attachmentFolder: "学习导师/附件",
 };
@@ -51,8 +55,12 @@ export class LTSettingTab extends PluginSettingTab {
     text("API Key", "仅存本地，不入库", "imageKey", "sk-...");
     text("Model", "", "imageModel");
 
-    containerEl.createEl("h3", { text: "嵌入与目录" });
-    text("本地嵌入模型", "transformers.js 模型 id", "embedModel");
+    containerEl.createEl("h3", { text: "嵌入 API（语义检索）" });
+    text("Base URL", "OpenAI 兼容 embeddings 端点", "embedBaseUrl");
+    text("API Key", "仅存本地，不入库", "embedKey", "sk-...");
+    text("Model", "如 text-embedding-3-small / BAAI/bge-m3", "embedModel");
+
+    containerEl.createEl("h3", { text: "目录" });
     text("笔记目录", "存为笔记的目标目录", "noteFolder");
     text("附件目录", "配图保存目录", "attachmentFolder");
   }

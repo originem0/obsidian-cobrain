@@ -1,6 +1,6 @@
 import { Plugin, Notice, TFile, Modal, App } from "obsidian";
 import { LTSettings, DEFAULT_SETTINGS, LTSettingTab } from "./settings";
-import { LocalEmbedder } from "./rag/localEmbedder";
+import { ApiEmbedder } from "./rag/apiEmbedder";
 import { VectorStore } from "./rag/vectorStore";
 import { Indexer } from "./rag/indexer";
 import { Retriever } from "./rag/retriever";
@@ -8,7 +8,7 @@ import { Retriever } from "./rag/retriever";
 export default class LearningTutorPlugin extends Plugin {
   settings!: LTSettings;
   store!: VectorStore;
-  embedder!: LocalEmbedder;
+  embedder!: ApiEmbedder;
   indexer!: Indexer;
   retriever!: Retriever;
 
@@ -19,7 +19,12 @@ export default class LearningTutorPlugin extends Plugin {
     this.store = new VectorStore();
     const data = await this.loadData();
     this.store.deserialize(data?.index ?? null);
-    this.embedder = new LocalEmbedder(this.settings.embedModel, true, this.loadOrtWasmPrefix());
+    // 嵌入模型变更 → 旧向量维度/空间不兼容，清空待重建
+    if (data?.embedModel && data.embedModel !== this.settings.embedModel) {
+      this.store.deserialize(null);
+      new Notice("嵌入模型已变更，旧索引已清空，请重新「LT: 重建索引」");
+    }
+    this.embedder = new ApiEmbedder(this.settings.embedBaseUrl, this.settings.embedKey, this.settings.embedModel);
     this.indexer = new Indexer(this.app, this.embedder, this.store);
     this.retriever = new Retriever(this.embedder, this.store);
 
@@ -67,7 +72,8 @@ export default class LearningTutorPlugin extends Plugin {
 
   async persistIndex() {
     // 直接整体写入，不再 loadData 读一遍（避免索引增大后每次持久化的 O(n²) I/O）
-    await this.saveData({ settings: this.settings, index: this.store.serialize() });
+    // 记录嵌入模型，换模型时据此判断旧索引失效
+    await this.saveData({ settings: this.settings, index: this.store.serialize(), embedModel: this.settings.embedModel });
   }
 
   // 把随插件分发的 patched glue + wasm 所在目录转成 onnxruntime-web 可用的 app:// 前缀。
