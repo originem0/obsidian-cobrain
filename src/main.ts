@@ -66,9 +66,8 @@ export default class LearningTutorPlugin extends Plugin {
   }
 
   async persistIndex() {
-    const data = (await this.loadData()) ?? {};
-    data.index = this.store.serialize();
-    await this.saveData(data);
+    // 直接整体写入，不再 loadData 读一遍（避免索引增大后每次持久化的 O(n²) I/O）
+    await this.saveData({ settings: this.settings, index: this.store.serialize() });
   }
 
   // 把随插件分发的 patched glue + wasm 所在目录转成 onnxruntime-web 可用的 app:// 前缀。

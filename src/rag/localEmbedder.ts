@@ -44,9 +44,17 @@ export class LocalEmbedder implements Embedder {
   }
 
   async embedDocuments(texts: string[]): Promise<number[][]> {
+    await this.ensure();
     const out: number[][] = [];
-    for (const t of texts) {
-      out.push(await this.embedOne(this.useE5Prefix ? `passage: ${t}` : t));
+    const B = 32; // 批量嵌入：一次喂多条，摊薄每次推理调用的固定开销
+    for (let i = 0; i < texts.length; i += B) {
+      const batch = texts.slice(i, i + B).map(t => (this.useE5Prefix ? `passage: ${t}` : t));
+      const res = await this.extractor(batch, { pooling: "mean", normalize: true });
+      const dim = res.dims[res.dims.length - 1];
+      this.dim = dim;
+      for (let j = 0; j < batch.length; j++) {
+        out.push(Array.from(res.data.subarray(j * dim, (j + 1) * dim)) as number[]);
+      }
     }
     return out;
   }

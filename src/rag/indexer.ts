@@ -36,9 +36,9 @@ export class Indexer {
         await this.indexFile(f);
       }
       done++;
-      if (done % 5 === 0 || done === files.length) {
-        notice.setMessage(`索引中… ${done}/${files.length}`);
-        await onSave(); // 周期性持久化，防中断丢进度
+      notice.setMessage(`索引中… ${done}/${files.length}`);
+      if (done % 30 === 0 || done === files.length) {
+        await onSave(); // 周期性持久化，防中断丢进度（降低频率以减少整表写入开销）
       }
     }
     notice.hide();
