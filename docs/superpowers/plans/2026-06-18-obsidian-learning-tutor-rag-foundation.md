@@ -1,5 +1,7 @@
 # Obsidian 学习导师插件 — Plan 1：RAG 基础 Implementation Plan
 
+> 历史快照（2026-06-18）。本项目已演进为 **Cobrain（创作副脑）**。本文档保留作过程记录，当前设计以 `README.md` 及 design 文档「演进」小节为准。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 搭好"本地嵌入 + 自建向量库 + 语义检索 vault"的基础，产出一个能用调试命令独立验证的语义检索能力（给一段查询 → 返回 vault 中最相关的笔记片段）。

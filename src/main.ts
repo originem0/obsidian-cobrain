@@ -43,19 +43,19 @@ export default class LearningTutorPlugin extends Plugin {
     this.addRibbonIcon("brain", "创作副脑", () => this.activateChatView());
     this.addCommand({
       id: "lt-open-tutor",
-      name: "LT: 打开创作副脑",
+      name: "Cobrain: 打开创作副脑",
       callback: () => this.activateChatView(),
     });
 
     this.addCommand({
       id: "lt-reindex",
-      name: "LT: 重建索引",
+      name: "Cobrain: 重建索引",
       callback: () => this.indexer.reindexAll(() => this.persistIndex()),
     });
 
     this.addCommand({
       id: "lt-test-retrieval",
-      name: "LT: 测试检索",
+      name: "Cobrain: 测试检索",
       callback: () => new QueryModal(this.app, async (q) => {
         const hits = await this.retriever.retrieve(q, 8);
         new ResultsModal(this.app, q, hits).open();

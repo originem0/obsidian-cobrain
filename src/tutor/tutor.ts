@@ -85,7 +85,7 @@ export class Tutor {
       { temperature: 0.3, maxTokens: 4096 },
     );
     const m = reply.match(/^标题[：:]\s*(.+)$/m);
-    const title = m ? m[1].trim() : "学习笔记";
+    const title = m ? m[1].trim() : "cobrain-note";
     const body = reply.replace(/^标题[：:]\s*.+$/m, "").trim();
     return { title, body };
   }
