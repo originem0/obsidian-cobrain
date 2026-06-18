@@ -19,7 +19,7 @@ export default class LearningTutorPlugin extends Plugin {
     this.store = new VectorStore();
     const data = await this.loadData();
     this.store.deserialize(data?.index ?? null);
-    this.embedder = new LocalEmbedder(this.settings.embedModel);
+    this.embedder = new LocalEmbedder(this.settings.embedModel, true, await this.loadOrtWasmPaths());
     this.indexer = new Indexer(this.app, this.embedder, this.store);
     this.retriever = new Retriever(this.embedder, this.store);
 
@@ -69,6 +69,26 @@ export default class LearningTutorPlugin extends Plugin {
     const data = (await this.loadData()) ?? {};
     data.index = this.store.serialize();
     await this.saveData(data);
+  }
+
+  // 读取随插件分发的 patched onnxruntime-web glue + wasm，做成 blob URL 喂给 onnxruntime-web，
+  // 杜绝其从 CDN 取多线程 glue（会 import worker_threads，在渲染进程解析失败）。
+  async loadOrtWasmPaths(): Promise<Record<string, string> | undefined> {
+    try {
+      const dir = this.manifest.dir;
+      if (!dir) return undefined;
+      const glueText = await this.app.vault.adapter.read(`${dir}/ort-wasm-simd-threaded.jsep.mjs`);
+      const wasmBin = await this.app.vault.adapter.readBinary(`${dir}/ort-wasm-simd-threaded.jsep.wasm`);
+      const glueUrl = URL.createObjectURL(new Blob([glueText], { type: "text/javascript" }));
+      const wasmUrl = URL.createObjectURL(new Blob([wasmBin], { type: "application/wasm" }));
+      return {
+        "ort-wasm-simd-threaded.jsep.mjs": glueUrl,
+        "ort-wasm-simd-threaded.jsep.wasm": wasmUrl,
+      };
+    } catch (e) {
+      console.error("Learning Tutor: 本地 ort wasm 资源加载失败，回退默认", e);
+      return undefined;
+    }
   }
 }
 

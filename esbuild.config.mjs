@@ -1,7 +1,7 @@
 import esbuild from "esbuild";
 import process from "process";
 import path from "path";
-import { readFile } from "fs/promises";
+import { readFile, writeFile, copyFile } from "fs/promises";
 
 const prod = process.argv[2] === "production";
 // 强制打包 transformers 的 web 构建（onnxruntime-web/wasm）。否则在 Electron 渲染进程会落到
@@ -29,6 +29,24 @@ const forceTransformersWebEnv = {
     });
   },
 };
+
+// 把 onnxruntime-web 的 wasm glue patch 成纯浏览器模式（杜绝 worker_threads），与 .wasm 一起
+// 输出到项目根，随插件分发；运行时由插件读成 blob URL 喂给 onnxruntime-web（见 main.ts）。
+async function prepareOrtAssets() {
+  const dist = "node_modules/@huggingface/transformers/dist";
+  const glueName = "ort-wasm-simd-threaded.jsep.mjs";
+  const wasmName = "ort-wasm-simd-threaded.jsep.wasm";
+  const orig = await readFile(path.join(dist, glueName), "utf8");
+  const glue = orig
+    .split("typeof globalThis.process?.versions?.node == 'string'").join("false")
+    .split('require("worker_threads")').join("({})")
+    .split("import('worker_threads')").join("Promise.resolve({})");
+  if (glue === orig) throw new Error("[ort-assets] glue patch 未命中，transformers 版本可能已变");
+  await writeFile(glueName, glue);
+  await copyFile(path.join(dist, wasmName), wasmName);
+  console.log("[ort-assets] 已输出 patched glue + wasm 到项目根");
+}
+await prepareOrtAssets();
 
 const ctx = await esbuild.context({
   entryPoints: ["src/main.ts"],

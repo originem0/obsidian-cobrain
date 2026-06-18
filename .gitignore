@@ -3,3 +3,5 @@ main.js
 *.map
 data.json
 .DS_Store
+ort-wasm-simd-threaded.jsep.mjs
+ort-wasm-simd-threaded.jsep.wasm

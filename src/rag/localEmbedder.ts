@@ -9,23 +9,23 @@ export class LocalEmbedder implements Embedder {
 
   constructor(
     private modelId = "Xenova/multilingual-e5-small",
-    private useE5Prefix = true
+    private useE5Prefix = true,
+    private wasmPaths?: Record<string, string>,
   ) {
     // 允许从 HF CDN 拉取模型；首次使用时下载并缓存
     env.allowRemoteModels = true;
-    // Obsidian/Electron 会被误判为 Node → 选到空壳 onnxruntime-node。强制 wasm 后端可用：
-    const wasm = (env.backends as any)?.onnx?.wasm;
-    if (wasm) {
-      wasm.numThreads = 1; // 单线程，免 SharedArrayBuffer（Obsidian 无跨源隔离）
-      wasm.wasmPaths =
-        "https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.8.1/dist/";
-    }
   }
 
   private async ensure(): Promise<void> {
     if (this.extractor) return;
     if (!this.loading) {
       this.loading = (async () => {
+        // env.backends.onnx === onnxruntime-web 的 env（见 transformers onnx.js: env.backends.onnx = ONNX_ENV）
+        const wasm = (env.backends as any)?.onnx?.wasm;
+        if (wasm) {
+          wasm.numThreads = 1; // 单线程：避免加载需 worker_threads 的多线程 glue
+          if (this.wasmPaths) wasm.wasmPaths = this.wasmPaths; // 本地 patched glue + wasm 的 blob URL
+        }
         this.extractor = await pipeline("feature-extraction", this.modelId, {
           device: "wasm",
           dtype: "fp32",
