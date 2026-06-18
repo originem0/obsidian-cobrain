@@ -1,4 +1,5 @@
-import { App, PluginSettingTab, Setting } from "obsidian";
+import { App, PluginSettingTab, Setting, Notice } from "obsidian";
+import { detectEmbeddingModels } from "./rag/apiEmbedder";
 import type LearningTutorPlugin from "./main";
 
 export interface LTSettings {
@@ -30,6 +31,7 @@ export const DEFAULT_SETTINGS: LTSettings = {
 };
 
 export class LTSettingTab extends PluginSettingTab {
+  private detectedEmbed: { id: string; dim: number }[] = [];
   constructor(app: App, private plugin: LearningTutorPlugin) { super(app, plugin); }
 
   display(): void {
@@ -58,7 +60,50 @@ export class LTSettingTab extends PluginSettingTab {
     containerEl.createEl("h3", { text: "嵌入 API（语义检索）" });
     text("Base URL", "OpenAI 兼容 embeddings 端点", "embedBaseUrl");
     text("API Key", "仅存本地，不入库", "embedKey", "sk-...");
-    text("Model", "如 text-embedding-3-small / BAAI/bge-m3", "embedModel");
+    new Setting(containerEl)
+      .setName("嵌入模型")
+      .setDesc(
+        this.detectedEmbed.length
+          ? `已检测到 ${this.detectedEmbed.length} 个实际可用模型，下拉选择`
+          : "点「检测」自动列出该端点实际可用的嵌入模型（无需手填）",
+      )
+      .addButton(b =>
+        b.setButtonText("检测").onClick(async () => {
+          if (!s.embedBaseUrl || !s.embedKey) {
+            new Notice("请先填 Base URL 和 API Key");
+            return;
+          }
+          b.setButtonText("检测中…").setDisabled(true);
+          const notice = new Notice("正在逐个测试该端点上的嵌入模型…", 0);
+          try {
+            this.detectedEmbed = await detectEmbeddingModels(s.embedBaseUrl, s.embedKey);
+            notice.hide();
+            new Notice(
+              this.detectedEmbed.length
+                ? `检测到 ${this.detectedEmbed.length} 个可用模型`
+                : "没检测到可用的嵌入模型",
+            );
+            this.display();
+          } catch (e: any) {
+            notice.hide();
+            new Notice("检测失败：" + (e?.message ?? String(e)));
+            b.setButtonText("检测").setDisabled(false);
+          }
+        }),
+      )
+      .addDropdown(d => {
+        const list = this.detectedEmbed.length ? this.detectedEmbed : [{ id: s.embedModel, dim: 0 }];
+        for (const m of list) d.addOption(m.id, m.dim ? `${m.id} · ${m.dim}维` : m.id);
+        d.setValue(s.embedModel).onChange(async v => {
+          if (v === s.embedModel) return;
+          s.embedModel = v;
+          await this.plugin.saveSettings();
+          // 换模型 → 旧向量维度/空间不兼容，立即清空，待重建
+          this.plugin.store.deserialize(null);
+          await this.plugin.persistIndex();
+          new Notice(`已切到 ${v}，索引已清空，请运行「LT: 重建索引」`);
+        });
+      });
 
     containerEl.createEl("h3", { text: "目录" });
     text("笔记目录", "存为笔记的目标目录", "noteFolder");

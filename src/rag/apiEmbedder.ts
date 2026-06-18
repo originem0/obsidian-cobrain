@@ -53,3 +53,52 @@ export class ApiEmbedder implements Embedder {
     return (await this.embed([text]))[0];
   }
 }
+
+// 检测某 OpenAI 兼容端点上「实际可用」的嵌入模型：
+// 1) 拉 /models 列表；2) 按名字筛出疑似嵌入模型（排除 reranker/聊天）；
+// 3) 逐个真实调用 /embeddings 测试，只保留 HTTP 200 且真返回向量的，附带维度。
+export async function detectEmbeddingModels(
+  baseUrl: string,
+  apiKey: string,
+): Promise<{ id: string; dim: number }[]> {
+  const base = baseUrl.replace(/\/+$/, "");
+  const listRes = await requestUrl({
+    url: `${base}/models`,
+    headers: { Authorization: `Bearer ${apiKey}` },
+    throw: false,
+  });
+  if (listRes.status !== 200) {
+    throw new Error(`拉取 /models 失败：HTTP ${listRes.status}`);
+  }
+  const ids: string[] = (listRes.json?.data ?? []).map((m: any) => m?.id).filter(Boolean);
+  const candidates = ids.filter(
+    id =>
+      /embed|bge|gte|m3e|jina|nomic|nv-?embed|text-embedding|(^|[^a-z0-9])e5([^a-z0-9]|$)/i.test(id) &&
+      !/rerank/i.test(id),
+  );
+
+  const working: { id: string; dim: number }[] = [];
+  const B = 6; // 小批并发，既快又不至于猛冲代理
+  for (let i = 0; i < candidates.length; i += B) {
+    const batch = candidates.slice(i, i + B);
+    const results = await Promise.all(
+      batch.map(async id => {
+        try {
+          const r = await requestUrl({
+            url: `${base}/embeddings`,
+            method: "POST",
+            headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+            body: JSON.stringify({ model: id, input: "测试" }),
+            throw: false,
+          });
+          const dim = r.status === 200 ? r.json?.data?.[0]?.embedding?.length ?? 0 : 0;
+          return dim > 0 ? { id, dim } : null;
+        } catch {
+          return null;
+        }
+      }),
+    );
+    for (const r of results) if (r) working.push(r);
+  }
+  return working;
+}
