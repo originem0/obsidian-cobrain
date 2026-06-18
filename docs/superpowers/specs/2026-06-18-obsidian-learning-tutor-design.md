@@ -20,12 +20,12 @@
 4. **知识库（RAG 闭环）**：
    - 输入：检索 vault 已有笔记作上下文，按用户已知水平讲、避免重复、连接新旧。
    - 输出：结构化笔记写回 vault，双链到相关旧笔记。
-   - 实现：**自建向量库**——用用户的 embeddings API 嵌入笔记，向量存插件数据，不耦合 SC 内部格式。
+   - 实现：**自建向量库**——**本地嵌入模型（transformers.js，可插拔 Embedder 接口）**嵌入笔记，向量存插件数据，不耦合 SC 内部格式。（用户提供的代理端点经实测无 embeddings 服务，故走本地；本地嵌入顺带缓解隐私——笔记内容不外发做嵌入，仅聊天上下文才发给 LLM 代理。）
 5. **生成时机**：**显式触发**（用户下命令才生成笔记/图），控制成本与质量。
 6. **视觉层（分工）**：
    - **Mermaid 概念图（主）**：焦点问题→概念→关系，与用户共建，服务「自己画概念图」这一学习目标。
    - **gpt-image-2 插画（辅）**：仅对可具象的概念，生成视觉隐喻。
-7. **可用 API**：文本 LLM（OpenAI 兼容，含 embeddings）、gpt-image-2。
+7. **可用 API（已确认实测）**：文本 LLM = `z-ai/glm-5.1`（`https://wududu.edu.kg/v1`，OpenAI 兼容，chat 实测 200）；图像 = `gpt-image-2`（`https://freeapi.dgbmc.top/v1`，OpenAI 兼容 HTTP）；**embeddings 走本地 transformers.js（代理无 embeddings 服务）**。密钥仅存插件设置，绝不入库。
 8. **自由度**：高度可定制——提示词、视觉策略、笔记模板、（未来）多 agent 均可改。
 
 ## v1 范围（YAGNI）
@@ -91,9 +91,9 @@
 
 ## 待确认的实现细节（实现期输入，非设计缺口）
 
-- **gpt-image-2 调用方式**：官方 SDK 还是某代理的 HTTP 端点？（决定配图模块写法）— 待用户确认
-- **embeddings API 具体**：端点、模型、向量维度、批量限制 — 待用户提供
-- **文本 LLM**：默认模型、上下文窗口
+- **gpt-image-2**：已确认走 OpenAI 兼容 HTTP（`POST /v1/images/generations`）；端点 `https://freeapi.dgbmc.top/v1`。
+- **embeddings**：已定为**本地 transformers.js**（代理实测无 embeddings channel）；默认选支持中文的多语种模型（如 `Xenova/multilingual-e5-small`，可在设置改），向量维度由模型决定。
+- **文本 LLM**：`z-ai/glm-5.1`（`https://wududu.edu.kg/v1`），上下文窗口以实测为准。
 - **笔记模板字段**：frontmatter schema 细节
 
 ## 参考
