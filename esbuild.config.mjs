@@ -1,11 +1,31 @@
 import esbuild from "esbuild";
 import process from "process";
 import path from "path";
+import { readFile } from "fs/promises";
 
 const prod = process.argv[2] === "production";
 // 强制打包 transformers 的 web 构建（onnxruntime-web/wasm）。否则在 Electron 渲染进程会落到
 // node 构建 → 空壳 onnxruntime-node → InferenceSession 为 undefined。
 const transformersWeb = path.resolve("node_modules/@huggingface/transformers/dist/transformers.web.js");
+
+// Electron 渲染进程里 process.release.name==='node' 为真，transformers 因此误判为 Node、
+// 走 onnxruntime-node 分支（设备白名单 dml/cpu，后端为空壳）。打包时把这个判断替换成 false，
+// 强制走 onnxruntime-web(wasm)。dist web 构建未压缩，字符串原样保留。
+const forceTransformersWebEnv = {
+  name: "force-transformers-web-env",
+  setup(build) {
+    build.onLoad({ filter: /transformers\.web\.js$/ }, async (args) => {
+      const src = await readFile(args.path, "utf8");
+      const needle = "process?.release?.name === 'node'";
+      const patched = src.split(needle).join("false");
+      const n = (src.length - patched.length) / (needle.length - "false".length);
+      console.log(`[force-web] IS_NODE_ENV 强制 false：替换 ${n} 处`);
+      if (n === 0) throw new Error("[force-web] 未找到 node 检测字符串，transformers 版本可能已变");
+      return { contents: patched, loader: "js" };
+    });
+  },
+};
+
 const ctx = await esbuild.context({
   entryPoints: ["src/main.ts"],
   bundle: true,
@@ -17,6 +37,7 @@ const ctx = await esbuild.context({
     // 兜底：任何对 onnxruntime-node 的引用也指向 web
     "onnxruntime-node": "onnxruntime-web",
   },
+  plugins: [forceTransformersWebEnv],
   format: "cjs",
   target: "es2020",
   // transformers.js 走 onnxruntime-web(wasm)：onnxruntime-node 的原生 .node 绑定无法被 esbuild 打包；
