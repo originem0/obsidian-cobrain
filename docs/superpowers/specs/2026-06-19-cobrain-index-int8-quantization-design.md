@@ -73,7 +73,9 @@ int8 编码为字节时用补码（`q & 0xff`），解码时还原符号（`b < 
 - 带 `q`（字符串）→ v2 新格式，反量化得 `vector`。
 - 带 `vector`（数组）→ 旧 float64 格式，直接使用。
 
-因此现存的 160 MB `data.json`（旧 float64）在下次重载时：`loadIndex` 迁移读入（旧格式分支）→ 内存得到 float 向量 → 下次 `persistIndex` 自动写成 v2 int8。**用户无需手动重建索引。** 已迁移成 float64 `index.json` 的情形同理，下次写自动转 v2。
+因此现存的 160 MB `data.json`（旧 float64）在重载时：`loadIndex` 读入并从 `data.json` 剥离，标记为非 v2 来源，**加载后立即用 v2 量化格式重写出 `index.json`**——首次重载即把体积降到位、无需手动重建索引。已存成旧 float64 `index.json` 的情形同理：`loadIndex` 靠顶层 `v` 版本号识别（`v !== 2`），加载后量化重写一次。
+
+> 关键：量化只在 `serialize()` 内发生。迁移/旧文件若只是 `JSON.stringify` 搬运，并不会量化（只去掉 pretty 缩进，160MB→~102MB）。所以靠 `loadIndex` 的 `needsRewrite` 在加载后强制走一次 `persistIndex()`（→`serialize()`→量化），才真正把体积降到位。
 
 ## 改动范围
 

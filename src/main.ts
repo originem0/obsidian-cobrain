@@ -112,7 +112,7 @@ export default class CobrainPlugin extends Plugin {
 
   // 启动加载索引：优先读 index.json；不存在则尝试从旧版 data.json.index 一次性迁移并剥离。
   private async loadIndex(): Promise<void> {
-    // 宽松结构：既能装下 v2 序列化输出，也能装下迁移自旧 data.json.index 的旧格式
+    // 宽松结构：既能装下 v2 序列化输出，也能装下旧 float64 格式（旧 index.json 或 data.json 迁移来的）
     type IndexFile = {
       v?: number;
       entries?: unknown[];
@@ -122,30 +122,39 @@ export default class CobrainPlugin extends Plugin {
     };
     const path = this.indexPath();
     let payload: IndexFile | null = null;
+    let needsRewrite = false; // 非 v2（旧 float64 / 迁移来的）→ 加载后用 int8 量化格式重写一次，降体积
+
     if (await this.app.vault.adapter.exists(path)) {
       try {
         payload = JSON.parse(await this.app.vault.adapter.read(path));
+        // 旧格式 index.json（无 v:2，向量是 float64）→ 标记重写。注意：量化只在 serialize() 里做，
+        // 早期迁移直接 stringify 旧 payload 不会量化，故这里靠版本号兜底，加载即升级、无需重嵌。
+        if (payload && payload.v !== 2) needsRewrite = true;
       } catch (e) {
         console.error("Cobrain: index.json 解析失败，按空索引处理", e);
       }
     } else {
-      // 迁移：旧版本把索引塞在 data.json 里。搬到独立文件，并把 index/embedModel 从 data.json 剥掉。
+      // 迁移：旧版本把索引塞在 data.json 里。读出来、从 data.json 剥掉；下面统一用量化格式写出。
       const data = (await this.loadData()) ?? {};
       if (data.index) {
         payload = { ...data.index, embedModel: data.embedModel };
-        await this.app.vault.adapter.write(path, JSON.stringify(payload));
+        needsRewrite = true;
         delete data.index;
         delete data.embedModel;
         await this.saveData(data);
-        console.log("Cobrain: 已把旧索引从 data.json 迁移到 index.json");
+        console.log("Cobrain: 已把旧索引从 data.json 迁出");
       }
     }
+
     this.store.deserialize(payload ?? null);
     // 换嵌入模型 → 维度/空间不兼容，清空待重建
     if (payload?.embedModel && payload.embedModel !== this.settings.embedModel) {
       this.store.deserialize(null);
       new Notice("嵌入模型已变更，旧索引已清空，请重新「Cobrain: 重建索引」");
+      needsRewrite = true;
     }
+    // 旧格式 / 迁移 / 清空：用 v2 量化格式落盘一次，首次重载后体积即降到位（无需重新嵌入）
+    if (needsRewrite) await this.persistIndex();
   }
 
   // 防抖重嵌：编辑停顿约 2.5s 才嵌入变更文件。失败冒泡为 Notice，不再静默吞掉（旧代码无 catch）。
