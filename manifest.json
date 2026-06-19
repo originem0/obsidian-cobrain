@@ -1,7 +1,7 @@
 {
   "id": "cobrain",
   "name": "Cobrain",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "minAppVersion": "1.4.0",
   "description": "懂你 vault 的创作副脑：把你写过的笔记当前知识喂给 AI，撞出旧念头、回抛问题——陪你想，不替你想。",
   "author": "samsara",
