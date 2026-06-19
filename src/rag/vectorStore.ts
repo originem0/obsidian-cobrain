@@ -1,4 +1,4 @@
-import { topK } from "./vectorMath";
+import { dot } from "./vectorMath";
 import { quantizeVector, dequantizeVector } from "../util/quantize";
 
 export interface Entry { path: string; chunkIdx: number; text: string; heading: string; vector: number[]; }
@@ -59,15 +59,21 @@ export class VectorStore {
         `嵌入维度不一致：查询 ${vector.length} 维，索引 ${this.entries[0].vector.length} 维。请运行「Cobrain: 重建索引」`,
       );
     }
-    const scored = topK(
-      vector,
-      this.entries.map(e => ({ id: `${e.path}#${e.chunkIdx}`, vector: e.vector })),
-      k
-    );
-    return scored.map(s => {
-      const e = this.entries.find(x => `${x.path}#${x.chunkIdx}` === s.id)!;
-      return { path: e.path, text: e.text, heading: e.heading, score: s.score };
-    });
+    // 按「笔记」去重返回 top-k：每篇只保留分数最高的那个 chunk。
+    // 旧实现取 top-k chunk，同一篇笔记的多个 chunk 会挤占名额，把别的相关笔记挤出榜；
+    // 中文长文的相似度分布又往往很平，于是稍逊但不同主题的好笔记容易被切掉。按篇去重让名额分散到更多笔记上。
+    const scored = this.entries
+      .map(e => ({ e, score: dot(vector, e.vector) }))
+      .sort((a, b) => b.score - a.score);
+    const hits: QueryHit[] = [];
+    const seen = new Set<string>();
+    for (const { e, score } of scored) {
+      if (seen.has(e.path)) continue;
+      seen.add(e.path);
+      hits.push({ path: e.path, text: e.text, heading: e.heading, score });
+      if (hits.length >= k) break;
+    }
+    return hits;
   }
 
   serialize(): { v: number; entries: StoredEntry[]; mtimes: Record<string, number>; hashes: Record<string, string> } {

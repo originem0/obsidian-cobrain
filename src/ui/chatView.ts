@@ -96,7 +96,7 @@ export class ChatView extends ItemView {
     });
     const wrap = this.messagesEl.createDiv({ cls: "cobrain-related" });
     wrap.createDiv({ cls: "cobrain-related-head", text: "你写过的（点开撞一撞）" });
-    uniq.slice(0, 5).forEach(h => {
+    uniq.slice(0, 8).forEach(h => {
       const item = wrap.createDiv({ cls: "cobrain-related-item" });
       const title = (h.path.split("/").pop() ?? h.path).replace(/\.md$/, "") + (h.heading ? " › " + h.heading : "");
       item.createDiv({ cls: "cobrain-related-title", text: title });

@@ -111,6 +111,25 @@ test("serializeFile→deserializeFile 往返：命中与 mtime 保留", () => {
   expect(s2.getMtime("a.md")).toBe(7);
 });
 
+test("query 按笔记去重：同一篇的多个 chunk 只占一个名额，给别的笔记腾位", () => {
+  const s = new VectorStore();
+  // a.md 有两个高分 chunk；b.md、c.md 各一个略低分
+  s.setFile("a.md", 1, [
+    { text: "a1", heading: "", vector: [1, 0] },       // 与 [1,0] 点积 1.0
+    { text: "a2", heading: "", vector: [0.99, 0.01] }, // ~0.99
+  ]);
+  s.setFile("b.md", 1, [{ text: "b1", heading: "", vector: [0.9, 0.1] }]); // ~0.9
+  s.setFile("c.md", 1, [{ text: "c1", heading: "", vector: [0.8, 0.2] }]); // ~0.8
+
+  const hits = s.query([1, 0], 2);
+  // 旧实现取 top-2 chunk 会返回 a1、a2（都是 a.md）；去重后应是 a.md、b.md
+  expect(hits.map(h => h.path)).toEqual(["a.md", "b.md"]);
+  // 每篇至多一个名额
+  expect(new Set(hits.map(h => h.path)).size).toBe(hits.length);
+  // 保留的是该篇分数最高的 chunk
+  expect(hits[0].text).toBe("a1");
+});
+
 test("renameFile 把条目/mtime/hash 改键到新路径（不重嵌）", () => {
   const s = new VectorStore();
   s.setFile("old.md", 5, [{ text: "猫", heading: "", vector: [1, 0] }]);

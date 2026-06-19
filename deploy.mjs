@@ -6,7 +6,7 @@ import path from "path";
 const dest = process.env.LT_VAULT_PLUGIN_DIR;
 
 if (!dest) {
-  throw new Error("请先设置 LT_VAULT_PLUGIN_DIR，例如 D:/Learning/Notes/世界何以至此/.obsidian/plugins/cobrain");
+  throw new Error("请先设置 LT_VAULT_PLUGIN_DIR，指向目标 vault 的插件目录，例如 <vault>/.obsidian/plugins/cobrain");
 }
 
 await mkdir(dest, { recursive: true });

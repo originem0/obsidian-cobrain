@@ -17,11 +17,14 @@ export class Tutor {
 
   private async retrieveContext(query: string): Promise<{ context: string; sources: string[]; hits: QueryHit[] }> {
     try {
-      const hits = await this.retriever.retrieve(query, 6);
-      const sources = [...new Set(hits.map(h => h.path))];
-      const context = hits.length
+      // 检索 8 篇不同笔记摊给人看（UI「你写过的」），但只取前 6 篇喂模型：
+      // 人需要更宽的「撞一撞」面（漏掉的好笔记自己点开），模型则要聚焦、省 token。
+      const hits = await this.retriever.retrieve(query, 8);
+      const forLLM = hits.slice(0, 6);
+      const sources = [...new Set(forLLM.map(h => h.path))];
+      const context = forLLM.length
         ? "已有笔记（从用户 vault 检索到的相关片段；据此判断用户已知什么，并用 [[路径]] 引用相关的）：\n" +
-          hits.map(h => `- [${h.path}${h.heading ? " › " + h.heading : ""}]\n  ${h.text.slice(0, 300)}`).join("\n")
+          forLLM.map(h => `- [${h.path}${h.heading ? " › " + h.heading : ""}]\n  ${h.text.slice(0, 300)}`).join("\n")
         : "";
       return { context, sources, hits };
     } catch (e) {
