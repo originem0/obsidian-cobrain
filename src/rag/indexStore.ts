@@ -23,15 +23,26 @@ export class IndexStore {
     if (await this.adapter.exists(this.dir())) {
       let embedModel: string | undefined;
       const listed = await this.adapter.list(this.dir());
+      const shards: string[] = [];
       for (const f of listed.files) {
         const name = f.split("/").pop() ?? "";
         if (name === META) {
           try { embedModel = JSON.parse(await this.adapter.read(f)).embedModel || undefined; } catch { /* 坏 meta 忽略 */ }
           continue;
         }
-        if (!name.endsWith(".json")) continue;
-        try { this.store.deserializeFile(JSON.parse(await this.adapter.read(f))); }
-        catch (e) { console.error("Cobrain: 分片解析失败", f, e); }
+        if (name.endsWith(".json")) shards.push(f);
+      }
+      // 并行读分片：数百个文件串行 await 会拖慢加载（且这一步在 onload 之外后台跑）。读完再逐个反序列化进 store。
+      const contents = await Promise.all(
+        shards.map(f => this.adapter.read(f).then(
+          txt => ({ f, txt }),
+          e => { console.error("Cobrain: 分片读取失败", f, e); return null; },
+        )),
+      );
+      for (const c of contents) {
+        if (!c) continue;
+        try { this.store.deserializeFile(JSON.parse(c.txt)); }
+        catch (e) { console.error("Cobrain: 分片解析失败", c.f, e); }
       }
       // 同步可能把旧单文件 index.json 带回来：以 index/ 为准，清掉它
       if (await this.adapter.exists(this.legacyPath())) await this.adapter.remove(this.legacyPath()).catch(() => {});

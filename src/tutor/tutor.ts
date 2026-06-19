@@ -65,6 +65,27 @@ export class Tutor {
     );
   }
 
+  // 从对话里提炼「最值得配图的核心洞见 + 视觉隐喻」，作为配图种子。
+  // 默认拿最后一句话常是提问，画了没意义；这里替用户从一团对话里拎出可画的那个隐喻。
+  async imageConcept(history: ChatMsg[]): Promise<string> {
+    const convo = history
+      .slice(-6)
+      .map(m => `${m.role === "user" ? "用户" : "副脑"}：${m.content}`)
+      .join("\n\n");
+    const reply = await this.chat.chat(
+      [
+        {
+          role: "system",
+          content:
+            "从下面这段对话里提炼出最值得配图的那个核心洞见，给出一句话：「一个核心概念 + 一个能隐喻它的具体画面」，便于据此画一张隐喻图。只输出这一句，不要解释、不要加引号。",
+        },
+        { role: "user", content: convo },
+      ],
+      { temperature: 0.5, maxTokens: 200 },
+    );
+    return reply.trim();
+  }
+
   // 把概念扩写成详细的文生图提示词。图像质量的根因在提示词太简陋，故先让 LLM 构想一个具象画面。
   async imagePrompt(concept: string): Promise<string> {
     return this.chat.chat(

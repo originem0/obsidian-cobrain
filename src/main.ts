@@ -26,24 +26,21 @@ export default class CobrainPlugin extends Plugin {
   // 索引在 index/ 分片里（见 IndexStore），settings 本身已很小，这里再省掉高频小写入。
   saveSettingsDebounced = debounce(() => void this.saveSettings(), 400, true);
   private disposed = false; // 卸载后置位：阻止已排队的防抖回调在插件卸载后继续写盘
+  // 索引加载较重（数百分片 + 上万向量反量化），不放进 onload 关键路径，否则 Obsidian 报「加载耗时过长」。
+  // onload 后台启动加载，检索/重嵌前先 await 它，确保不会查到半截索引。
+  private indexReady: Promise<void> = Promise.resolve();
 
   async onload() {
     await this.loadSettings();
     this.addSettingTab(new CobrainSettingTab(this.app, this));
 
     this.store = new VectorStore();
-    // 索引从 index/ 分片加载（旧 index.json 会在此一次性迁移为分片）
+    // 索引从 index/ 分片加载（旧 index.json 会在此一次性迁移为分片）——见下方后台 loadIndex()
     this.indexStore = new IndexStore(this.app, this.manifest, this.store);
-    const storedModel = await this.indexStore.load();
-    if (storedModel && storedModel !== this.settings.embedModel) {
-      // 换过嵌入模型 → 维度/空间不兼容，清空待重建
-      this.store.deserialize(null);
-      await this.indexStore.clearAll();
-      new Notice("嵌入模型已变更，旧索引已清空，请重新「Cobrain: 重建索引」");
-    }
     this.embedder = new ApiEmbedder(this.settings);
     this.indexer = new Indexer(this.app, this.embedder, this.store);
-    this.retriever = new Retriever(this.embedder, this.store);
+    // retriever 检索前会 await indexReady：启动后立刻查询也不会落空
+    this.retriever = new Retriever(this.embedder, this.store, () => this.indexReady);
     const chatClient = new ChatClient(this.settings);
     this.tutor = new Tutor(this.retriever, chatClient, this.settings);
     this.image = new ImageClient(this.settings);
@@ -70,9 +67,10 @@ export default class CobrainPlugin extends Plugin {
     this.addCommand({
       id: "cobrain-reindex",
       name: "Cobrain: 重建索引",
-      callback: () => {
+      callback: async () => {
         // 移动端为只读检索：不重建（避免蜂窝网重嵌 + 改写索引引发同步冲突），索引在桌面端建。
         if (Platform.isMobile) { new Notice("移动端为只读检索，索引请在桌面端重建"); return; }
+        await this.indexReady; // 别在索引还没加载完时就重建（否则会把所有文件当"新文件"全量重嵌）
         this.indexer.reindexAll(this.indexStore, this.settings.embedModel);
       },
     });
@@ -98,16 +96,18 @@ export default class CobrainPlugin extends Plugin {
       this.registerEvent(this.app.vault.on("modify", (f) => {
         if (f instanceof TFile && f.extension === "md") this.scheduleReindex(f);
       }));
-      this.registerEvent(this.app.vault.on("delete", (f) => {
+      this.registerEvent(this.app.vault.on("delete", async (f) => {
+        await this.indexReady; // 避免与后台加载竞争 store/分片
         // 文件在防抖窗口内被删：清掉待嵌入定时器，否则会把已删文件重新嵌回索引
         const t = this.modifyTimers.get(f.path);
         if (t) { clearTimeout(t); this.modifyTimers.delete(f.path); }
         this.indexer.onDelete(f.path);
         this.indexStore.removeFile(f.path);
       }));
-      this.registerEvent(this.app.vault.on("rename", (file, oldPath) => {
+      this.registerEvent(this.app.vault.on("rename", async (file, oldPath) => {
         // 改名/移动：内容没变，不重嵌——把索引条目改键到新路径，挪分片(删旧分片、写新分片)。
         if (!(file instanceof TFile) || file.extension !== "md") return;
+        await this.indexReady; // 改键前确保索引已加载，否则改的是空 store
         const t = this.modifyTimers.get(oldPath);
         if (t) { clearTimeout(t); this.modifyTimers.delete(oldPath); }
         this.store.renameFile(oldPath, file.path);
@@ -124,7 +124,21 @@ export default class CobrainPlugin extends Plugin {
       );
     }));
 
+    // onload 已把视图/命令/事件全部接好，最后才后台启动索引加载——onload 不被它阻塞，告警消失。
+    this.indexReady = this.loadIndex();
     console.log("Cobrain loaded");
+  }
+
+  // 后台加载索引分片 + 换模型检测。onload 不 await 它（只存其 Promise 供检索/重嵌前 await）。
+  private async loadIndex(): Promise<void> {
+    const storedModel = await this.indexStore.load();
+    if (this.disposed) return; // 加载期间插件被卸载：不再动设置/盘
+    if (storedModel && storedModel !== this.settings.embedModel) {
+      // 换过嵌入模型 → 维度/空间不兼容，清空待重建
+      this.store.deserialize(null);
+      await this.indexStore.clearAll();
+      new Notice("嵌入模型已变更，旧索引已清空，请重新「Cobrain: 重建索引」");
+    }
   }
 
   onunload() {
@@ -156,8 +170,9 @@ export default class CobrainPlugin extends Plugin {
       setTimeout(() => {
         this.modifyTimers.delete(file.path);
         if (this.disposed) return; // 卸载后不再写盘
-        this.indexer
-          .onModify(file)
+        // 先 await indexReady：避免索引还没加载完就 onModify，把条目写进半截 store
+        this.indexReady
+          .then(() => this.indexer.onModify(file))
           .then((changed) => { if (changed) return this.indexStore.saveFile(file.path); })
           .catch((e) =>
             new Notice(`索引更新失败：${file.path}：${e instanceof Error ? e.message : String(e)}`),

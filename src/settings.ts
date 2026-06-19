@@ -284,7 +284,7 @@ export class CobrainSettingTab extends PluginSettingTab {
     this.text(body, "标签", "逗号分隔，写入 frontmatter tags", "noteTags");
     new Setting(body)
       .setName("附原始问题")
-      .setDesc("存笔记时在末尾附上你的提问（不含 AI 回答）")
+      .setDesc("存为笔记时该项的默认勾选状态（每次保存仍可在选项框里单独调整）")
       .addToggle(t =>
         t.setValue(s.appendConversation).onChange(async v => {
           s.appendConversation = v;
