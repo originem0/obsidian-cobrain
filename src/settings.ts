@@ -197,7 +197,7 @@ export class CobrainSettingTab extends PluginSettingTab {
             await this.plugin.saveSettings();
             // 换模型 → 旧向量维度/空间不兼容，立即清空，待重建
             this.plugin.store.deserialize(null);
-            await this.plugin.persistIndex();
+            await this.plugin.indexStore.clearAll();
             new Notice(`已切到 ${v}，索引已清空，请运行「Cobrain: 重建索引」`);
           } else {
             this.plugin.saveSettingsDebounced();

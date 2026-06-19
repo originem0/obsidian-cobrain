@@ -1,4 +1,4 @@
-import { Plugin, Notice, TFile, Modal, App, normalizePath, debounce, Platform, Editor, MarkdownFileInfo } from "obsidian";
+import { Plugin, Notice, TFile, Modal, App, debounce, Platform, Editor, MarkdownFileInfo } from "obsidian";
 import { CobrainSettings, DEFAULT_SETTINGS, CobrainSettingTab } from "./settings";
 import { ApiEmbedder } from "./rag/apiEmbedder";
 import { VectorStore, type QueryHit } from "./rag/vectorStore";
@@ -9,6 +9,7 @@ import { Tutor } from "./tutor/tutor";
 import { ChatView, VIEW_TYPE_COBRAIN_CHAT } from "./ui/chatView";
 import { ImageClient } from "./llm/imageClient";
 import { buildQuote, findHeadingAbove, extractContext } from "./util/quote";
+import { IndexStore } from "./rag/indexStore";
 
 export default class CobrainPlugin extends Plugin {
   settings!: CobrainSettings;
@@ -18,10 +19,11 @@ export default class CobrainPlugin extends Plugin {
   retriever!: Retriever;
   tutor!: Tutor;
   image!: ImageClient;
+  indexStore!: IndexStore;
   // 按路径防抖「modify → 嵌入」的定时器，避免编辑期间反复触发 modify 反复打嵌入接口
   private modifyTimers = new Map<string, ReturnType<typeof setTimeout>>();
   // 设置页逐字符 onChange 走这个防抖版：停顿 400ms 才落盘，避免每键一次写。
-  // 索引已拆出 data.json（见 persistIndex），settings 本身已很小，这里再省掉高频小写入。
+  // 索引在 index/ 分片里（见 IndexStore），settings 本身已很小，这里再省掉高频小写入。
   saveSettingsDebounced = debounce(() => void this.saveSettings(), 400, true);
   private disposed = false; // 卸载后置位：阻止已排队的防抖回调在插件卸载后继续写盘
 
@@ -30,8 +32,15 @@ export default class CobrainPlugin extends Plugin {
     this.addSettingTab(new CobrainSettingTab(this.app, this));
 
     this.store = new VectorStore();
-    // 索引从独立的 index.json 加载（旧版本塞在 data.json 里的会在此一次性迁移过来）
-    await this.loadIndex();
+    // 索引从 index/ 分片加载（旧 index.json 会在此一次性迁移为分片）
+    this.indexStore = new IndexStore(this.app, this.manifest, this.store);
+    const storedModel = await this.indexStore.load();
+    if (storedModel && storedModel !== this.settings.embedModel) {
+      // 换过嵌入模型 → 维度/空间不兼容，清空待重建
+      this.store.deserialize(null);
+      await this.indexStore.clearAll();
+      new Notice("嵌入模型已变更，旧索引已清空，请重新「Cobrain: 重建索引」");
+    }
     this.embedder = new ApiEmbedder(this.settings);
     this.indexer = new Indexer(this.app, this.embedder, this.store);
     this.retriever = new Retriever(this.embedder, this.store);
@@ -55,7 +64,7 @@ export default class CobrainPlugin extends Plugin {
       callback: () => {
         // 移动端为只读检索：不重建（避免蜂窝网重嵌 + 改写索引引发同步冲突），索引在桌面端建。
         if (Platform.isMobile) { new Notice("移动端为只读检索，索引请在桌面端重建"); return; }
-        this.indexer.reindexAll(() => this.persistIndex());
+        this.indexer.reindexAll(this.indexStore, this.settings.embedModel);
       },
     });
 
@@ -85,7 +94,7 @@ export default class CobrainPlugin extends Plugin {
         const t = this.modifyTimers.get(f.path);
         if (t) { clearTimeout(t); this.modifyTimers.delete(f.path); }
         this.indexer.onDelete(f.path);
-        this.persistIndex();
+        this.indexStore.removeFile(f.path);
       }));
     }
 
@@ -109,78 +118,15 @@ export default class CobrainPlugin extends Plugin {
     console.log("Cobrain unloaded");
   }
 
-  // data.json 现在只存设置；向量索引已拆到独立的 index.json（见 loadIndex/persistIndex）。
+  // data.json 现在只存设置；向量索引在 index/ 分片里（见 IndexStore）。
   async loadSettings() {
     const data = await this.loadData();
     this.settings = Object.assign({}, DEFAULT_SETTINGS, data?.settings);
   }
 
-  // 只写设置（极小）。索引不再混在 data.json 里，故无需 read-modify-write，也不会与 persistIndex 互踩。
+  // 只写设置（极小）。索引在 index/ 分片里，与设置彻底解耦。
   async saveSettings() {
     await this.saveData({ settings: this.settings });
-  }
-
-  // 索引独立持久化到插件目录的 index.json，与 data.json（设置）彻底解耦：
-  // 改设置不再重写整份索引，两条写路径也不会再 lost-update 互踩。
-  async persistIndex(): Promise<void> {
-    // 移动端绝不写索引：堵住「文件同步非原子 → loadIndex 误判模型不符清空 → 空索引回传覆盖桌面索引」这条数据损坏链，
-    // 也避免两端并发写 10MB 文件产生同步冲突。兜住所有写索引路径（含 loadIndex 的 needsRewrite 回写）。
-    if (Platform.isMobile) return;
-    const payload = { ...this.store.serialize(), embedModel: this.settings.embedModel };
-    await this.app.vault.adapter.write(this.indexPath(), JSON.stringify(payload));
-  }
-
-  // 索引文件路径：插件目录下 index.json（manifest.dir 缺省时回退到 configDir 下的标准插件路径）。
-  private indexPath(): string {
-    const dir = this.manifest.dir ?? `${this.app.vault.configDir}/plugins/${this.manifest.id}`;
-    return normalizePath(`${dir}/index.json`);
-  }
-
-  // 启动加载索引：优先读 index.json；不存在则尝试从旧版 data.json.index 一次性迁移并剥离。
-  private async loadIndex(): Promise<void> {
-    // 宽松结构：既能装下 v2 序列化输出，也能装下旧 float64 格式（旧 index.json 或 data.json 迁移来的）
-    type IndexFile = {
-      v?: number;
-      entries?: unknown[];
-      mtimes?: Record<string, number>;
-      hashes?: Record<string, string>;
-      embedModel?: string;
-    };
-    const path = this.indexPath();
-    let payload: IndexFile | null = null;
-    let needsRewrite = false; // 非 v2（旧 float64 / 迁移来的）→ 加载后用 int8 量化格式重写一次，降体积
-
-    if (await this.app.vault.adapter.exists(path)) {
-      try {
-        payload = JSON.parse(await this.app.vault.adapter.read(path));
-        // 旧格式 index.json（无 v:2，向量是 float64）→ 标记重写。注意：量化只在 serialize() 里做，
-        // 早期迁移直接 stringify 旧 payload 不会量化，故这里靠版本号兜底，加载即升级、无需重嵌。
-        if (payload && payload.v !== 2) needsRewrite = true;
-      } catch (e) {
-        console.error("Cobrain: index.json 解析失败，按空索引处理", e);
-      }
-    } else {
-      // 迁移：旧版本把索引塞在 data.json 里。读出来、从 data.json 剥掉；下面统一用量化格式写出。
-      const data = (await this.loadData()) ?? {};
-      if (data.index) {
-        payload = { ...data.index, embedModel: data.embedModel };
-        needsRewrite = true;
-        delete data.index;
-        delete data.embedModel;
-        await this.saveData(data);
-        console.log("Cobrain: 已把旧索引从 data.json 迁出");
-      }
-    }
-
-    this.store.deserialize(payload ?? null);
-    // 换嵌入模型 → 维度/空间不兼容，清空待重建
-    if (payload?.embedModel && payload.embedModel !== this.settings.embedModel) {
-      this.store.deserialize(null);
-      new Notice("嵌入模型已变更，旧索引已清空，请重新「Cobrain: 重建索引」");
-      needsRewrite = true;
-    }
-    // 旧格式 / 迁移 / 清空：用 v2 量化格式落盘一次，首次重载后体积即降到位（无需重新嵌入）
-    if (needsRewrite) await this.persistIndex();
   }
 
   // 防抖重嵌：编辑停顿约 2.5s 才嵌入变更文件。失败冒泡为 Notice，不再静默吞掉（旧代码无 catch）。
@@ -194,7 +140,7 @@ export default class CobrainPlugin extends Plugin {
         if (this.disposed) return; // 卸载后不再写盘
         this.indexer
           .onModify(file)
-          .then(() => this.persistIndex())
+          .then(() => this.indexStore.saveFile(file.path))
           .catch((e) =>
             new Notice(`索引更新失败：${file.path}：${e instanceof Error ? e.message : String(e)}`),
           );
