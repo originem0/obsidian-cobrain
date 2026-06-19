@@ -110,3 +110,16 @@ test("serializeFile→deserializeFile 往返：命中与 mtime 保留", () => {
   expect(hit.heading).toBe("H");
   expect(s2.getMtime("a.md")).toBe(7);
 });
+
+test("renameFile 把条目/mtime/hash 改键到新路径（不重嵌）", () => {
+  const s = new VectorStore();
+  s.setFile("old.md", 5, [{ text: "猫", heading: "", vector: [1, 0] }]);
+  s.setHash("old.md", "h");
+  s.renameFile("old.md", "new.md");
+  expect(s.getMtime("old.md")).toBeNull();
+  expect(s.getHash("old.md")).toBeNull();
+  expect(s.getMtime("new.md")).toBe(5);
+  expect(s.getHash("new.md")).toBe("h");
+  expect(s.query([1, 0], 1)[0].path).toBe("new.md");
+  expect(s.allPaths()).toEqual(["new.md"]);
+});

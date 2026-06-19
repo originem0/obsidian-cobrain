@@ -27,6 +27,14 @@ export class VectorStore {
     delete this.hashes[path];
   }
 
+  // 改名/移动：把某篇的条目/mtime/hash 整体改键到新路径（内容没变，不重嵌）。
+  renameFile(oldPath: string, newPath: string): void {
+    if (oldPath === newPath) return;
+    for (const e of this.entries) if (e.path === oldPath) e.path = newPath;
+    if (oldPath in this.mtimes) { this.mtimes[newPath] = this.mtimes[oldPath]; delete this.mtimes[oldPath]; }
+    if (oldPath in this.hashes) { this.hashes[newPath] = this.hashes[oldPath]; delete this.hashes[oldPath]; }
+  }
+
   getMtime(path: string): number | null {
     return path in this.mtimes ? this.mtimes[path] : null;
   }

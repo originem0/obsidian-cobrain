@@ -96,6 +96,15 @@ export default class CobrainPlugin extends Plugin {
         this.indexer.onDelete(f.path);
         this.indexStore.removeFile(f.path);
       }));
+      this.registerEvent(this.app.vault.on("rename", (file, oldPath) => {
+        // 改名/移动：内容没变，不重嵌——把索引条目改键到新路径，挪分片(删旧分片、写新分片)。
+        if (!(file instanceof TFile) || file.extension !== "md") return;
+        const t = this.modifyTimers.get(oldPath);
+        if (t) { clearTimeout(t); this.modifyTimers.delete(oldPath); }
+        this.store.renameFile(oldPath, file.path);
+        this.indexStore.removeFile(oldPath);
+        this.indexStore.saveFile(file.path);
+      }));
     }
 
     // 选中文本 → 引用进 Cobrain（右键菜单；仅编辑模式有 editor 时出现，移动端编辑模式同样可用）
