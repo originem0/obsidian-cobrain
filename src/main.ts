@@ -1,4 +1,4 @@
-import { Plugin, Notice, TFile, Modal, App, normalizePath, debounce, Platform } from "obsidian";
+import { Plugin, Notice, TFile, Modal, App, normalizePath, debounce, Platform, Editor, MarkdownFileInfo } from "obsidian";
 import { CobrainSettings, DEFAULT_SETTINGS, CobrainSettingTab } from "./settings";
 import { ApiEmbedder } from "./rag/apiEmbedder";
 import { VectorStore, type QueryHit } from "./rag/vectorStore";
@@ -8,6 +8,7 @@ import { ChatClient } from "./llm/chatClient";
 import { Tutor } from "./tutor/tutor";
 import { ChatView, VIEW_TYPE_COBRAIN_CHAT } from "./ui/chatView";
 import { ImageClient } from "./llm/imageClient";
+import { buildQuote, findHeadingAbove } from "./util/quote";
 
 export default class CobrainPlugin extends Plugin {
   settings!: CobrainSettings;
@@ -67,6 +68,12 @@ export default class CobrainPlugin extends Plugin {
       }).open(),
     });
 
+    this.addCommand({
+      id: "cobrain-quote-selection",
+      name: "Cobrain: 引用选中文本",
+      editorCallback: (editor, ctx) => void this.quoteSelection(editor, ctx),
+    });
+
     // 移动端只读：不注册自动重嵌（否则每改一篇笔记都走蜂窝网打嵌入接口，并重写 10MB 索引引发同步冲突）。
     // 索引只在桌面端建，移动端读同步过来的索引做检索。
     if (!Platform.isMobile) {
@@ -81,6 +88,14 @@ export default class CobrainPlugin extends Plugin {
         this.persistIndex();
       }));
     }
+
+    // 选中文本 → 引用进 Cobrain（右键菜单；仅编辑模式有 editor 时出现，移动端编辑模式同样可用）
+    this.registerEvent(this.app.workspace.on("editor-menu", (menu, editor, ctx) => {
+      if (!editor.getSelection().trim()) return;
+      menu.addItem(item =>
+        item.setTitle("引用进 Cobrain").setIcon("brain").onClick(() => void this.quoteSelection(editor, ctx)),
+      );
+    }));
 
     console.log("Cobrain loaded");
   }
@@ -187,7 +202,7 @@ export default class CobrainPlugin extends Plugin {
     );
   }
 
-  async activateChatView(): Promise<void> {
+  async activateChatView(): Promise<ChatView | null> {
     const { workspace } = this.app;
     let leaf = workspace.getLeavesOfType(VIEW_TYPE_COBRAIN_CHAT)[0];
     if (!leaf) {
@@ -195,6 +210,20 @@ export default class CobrainPlugin extends Plugin {
       await leaf.setViewState({ type: VIEW_TYPE_COBRAIN_CHAT, active: true });
     }
     workspace.revealLeaf(leaf);
+    return leaf.view instanceof ChatView ? leaf.view : null;
+  }
+
+  // 选中文本 → 引用进 Cobrain：取选区 + 来源链接 + 最近标题，预填进对话面板输入框（不自动发）。
+  private async quoteSelection(editor: Editor, ctx: MarkdownFileInfo): Promise<void> {
+    const sel = editor.getSelection();
+    if (!sel.trim()) { new Notice("先选中一段文字"); return; }
+    const file = ctx.file;
+    if (!file) { new Notice("无法确定来源文件"); return; }
+    const linktext = this.app.metadataCache.fileToLinktext(file, "", true);
+    const lines = editor.getValue().split("\n");
+    const heading = findHeadingAbove(lines, editor.getCursor("from").line);
+    const view = await this.activateChatView();
+    view?.quoteIntoInput(buildQuote(sel, linktext, heading));
   }
 }
 

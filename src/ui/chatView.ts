@@ -134,6 +134,13 @@ export class ChatView extends ItemView {
     this.sendBtn.disabled = false;
   }
 
+  // 把"引用"(来源链接 + 原文)预填进输入框：已有内容则插在前面、保留你的字；光标停在引用之后。
+  quoteIntoInput(text: string): void {
+    this.inputEl.value = text + this.inputEl.value;
+    this.inputEl.focus();
+    this.inputEl.setSelectionRange(text.length, text.length);
+  }
+
   private async send(): Promise<void> {
     const text = this.inputEl.value.trim();
     if (!text) return;
