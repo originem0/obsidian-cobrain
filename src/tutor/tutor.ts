@@ -30,11 +30,14 @@ export class Tutor {
     }
   }
 
-  async ask(history: ChatMsg[], userMsg: string): Promise<{ reply: string; sources: string[]; related: QueryHit[] }> {
+  async ask(history: ChatMsg[], userMsg: string, sourceContext?: string): Promise<{ reply: string; sources: string[]; related: QueryHit[] }> {
     const { context, sources, hits } = await this.retrieveContext(userMsg);
     const messages: ChatMsg[] = [
       { role: "system", content: this.settings.tutorPrompt },
       ...(context ? [{ role: "system" as const, content: context }] : []),
+      ...(sourceContext
+        ? [{ role: "system" as const, content: "用户正在读的来源片段（据此理解他选中/提问的上下文）：\n" + sourceContext }]
+        : []),
       ...history,
       { role: "user", content: userMsg },
     ];
