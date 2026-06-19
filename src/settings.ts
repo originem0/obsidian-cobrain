@@ -1,5 +1,6 @@
-import { App, PluginSettingTab, Setting, Notice } from "obsidian";
+import { App, PluginSettingTab, Setting, Notice, DropdownComponent } from "obsidian";
 import { classifyModels, detectEmbeddingModels, listModels, testChat } from "./llm/probe";
+import { ensureCurrentOption } from "./llm/modelClassifier";
 import type CobrainPlugin from "./main";
 
 export interface CobrainSettings {
@@ -71,6 +72,8 @@ export const DEFAULT_SETTINGS: CobrainSettings = {
 type StringKeys = { [K in keyof CobrainSettings]: CobrainSettings[K] extends string ? K : never }[keyof CobrainSettings];
 type EndpointKind = "chat" | "image" | "embed";
 type EndpointStatus = { state: "untested" | "ok" | "fail"; text?: string };
+// 各端点对应的 model 设置键,供就地刷新下拉时回查当前值
+const MODEL_KEY: Record<EndpointKind, StringKeys> = { chat: "llmModel", image: "imageModel", embed: "embedModel" };
 
 export class CobrainSettingTab extends PluginSettingTab {
   private detected: { chat: string[]; image: string[]; embed: { id: string; dim: number }[] } = {
@@ -83,6 +86,9 @@ export class CobrainSettingTab extends PluginSettingTab {
     image: { state: "untested" },
     embed: { state: "untested" },
   };
+  // 状态灯 / 模型下拉的元素引用,用于改 URL/Key 后就地刷新而不整页重绘(整页重绘会让输入框失焦)
+  private statusEls: Partial<Record<EndpointKind, HTMLElement>> = {};
+  private modelDropdowns: Partial<Record<EndpointKind, DropdownComponent>> = {};
 
   constructor(app: App, private plugin: CobrainPlugin) { super(app, plugin); }
 
@@ -124,6 +130,7 @@ export class CobrainSettingTab extends PluginSettingTab {
   ): void {
     const s = this.plugin.settings;
     const { body, status } = this.collapsible(container, opts.title, true);
+    this.statusEls[opts.kind] = status;
     this.paintStatus(status, this.status[opts.kind]);
 
     if (opts.kind === "embed") {
@@ -180,6 +187,7 @@ export class CobrainSettingTab extends PluginSettingTab {
         }),
       )
       .addDropdown(d => {
+        this.modelDropdowns[opts.kind] = d;
         for (const item of detectedOptions) d.addOption(item.value, item.label);
         d.setValue(s[opts.modelKey]).onChange(async v => {
           if (v === s[opts.modelKey]) return;
@@ -295,6 +303,10 @@ export class CobrainSettingTab extends PluginSettingTab {
           this.status[resetStatus] = { state: "untested" };
           if (resetStatus === "embed") this.detected.embed = [];
           else this.detected[resetStatus] = [];
+          // 端点已改,之前的检测作废:就地重绘状态灯 + 重建下拉(不整页重绘以免输入框失焦)
+          const el = this.statusEls[resetStatus];
+          if (el) this.paintStatus(el, this.status[resetStatus]);
+          this.refreshModelDropdown(resetStatus);
         }
         this.plugin.saveSettingsDebounced();
       }),
@@ -349,13 +361,26 @@ export class CobrainSettingTab extends PluginSettingTab {
     el.style.color = "var(--text-muted)";
   }
 
+  private refreshModelDropdown(kind: EndpointKind): void {
+    const d = this.modelDropdowns[kind];
+    if (!d) return;
+    const current = this.plugin.settings[MODEL_KEY[kind]];
+    d.selectEl.empty();
+    for (const opt of this.modelOptions(kind, current)) d.addOption(opt.value, opt.label);
+    if (current) d.setValue(current);
+  }
+
   private modelOptions(kind: EndpointKind, current: string): { value: string; label: string }[] {
     if (kind === "embed") {
-      const list = this.detected.embed.length ? this.detected.embed : [{ id: current, dim: 0 }];
-      return list.filter(m => m.id).map(m => ({ value: m.id, label: m.dim ? `${m.id} · ${m.dim}维` : m.id }));
+      // current 始终并入,避免检测列表不含已存模型时下拉选不中(显示与实际不符)
+      const ids = ensureCurrentOption(this.detected.embed.map(m => m.id), current);
+      return ids.filter(Boolean).map(id => {
+        const dim = this.detected.embed.find(m => m.id === id)?.dim ?? 0;
+        return { value: id, label: dim ? `${id} · ${dim}维` : id };
+      });
     }
-    const list = this.detected[kind].length ? this.detected[kind] : [current];
-    return list.filter(Boolean).map(id => ({ value: id, label: id }));
+    const ids = ensureCurrentOption(this.detected[kind], current);
+    return ids.filter(Boolean).map(id => ({ value: id, label: id }));
   }
 
   private modelDesc(kind: EndpointKind, count: number): string {

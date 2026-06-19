@@ -67,5 +67,3 @@ export class ApiEmbedder implements Embedder {
     return (await this.embed([text]))[0];
   }
 }
-
-export { detectEmbeddingModels } from "../llm/probe";

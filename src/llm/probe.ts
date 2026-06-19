@@ -20,7 +20,11 @@ export async function listModels(baseUrl: string, apiKey: string): Promise<strin
   if (res.status !== 200) {
     throw new Error(`拉取 /models 失败：HTTP ${res.status} ${(res.text || "").slice(0, 200)}`);
   }
-  return ((res.json?.data ?? []) as Array<{ id?: unknown }>)
+  const data = res.json?.data;
+  if (!Array.isArray(data)) {
+    throw new Error("拉取 /models 失败：返回体里没有模型数组");
+  }
+  return (data as Array<{ id?: unknown }>)
     .map(m => m?.id)
     .filter((id): id is string => typeof id === "string" && id.length > 0);
 }
@@ -32,24 +36,29 @@ export async function testChat(
 ): Promise<{ ok: boolean; ms: number; error?: string }> {
   const base = baseUrl.replace(/\/+$/, "");
   const started = Date.now();
-  const res = await withTimeout(
-    requestUrl({
-      url: `${base}/chat/completions`,
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
-      body: JSON.stringify({
-        model,
-        messages: [{ role: "user", content: "hi" }],
-        max_tokens: 1,
+  // 把超时/网络异常也收进返回值,兑现「不抛错」的签名契约(调用方据 ok 点灯即可)
+  try {
+    const res = await withTimeout(
+      requestUrl({
+        url: `${base}/chat/completions`,
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+        body: JSON.stringify({
+          model,
+          messages: [{ role: "user", content: "hi" }],
+          max_tokens: 1,
+        }),
+        throw: false,
       }),
-      throw: false,
-    }),
-    CHAT_TEST_TIMEOUT_MS,
-    "聊天测试",
-  );
-  const ms = Date.now() - started;
-  if (res.status === 200) return { ok: true, ms };
-  return { ok: false, ms, error: `HTTP ${res.status} ${(res.text || "").slice(0, 200)}` };
+      CHAT_TEST_TIMEOUT_MS,
+      "聊天测试",
+    );
+    const ms = Date.now() - started;
+    if (res.status === 200) return { ok: true, ms };
+    return { ok: false, ms, error: `HTTP ${res.status} ${(res.text || "").slice(0, 200)}` };
+  } catch (e) {
+    return { ok: false, ms: Date.now() - started, error: e instanceof Error ? e.message : String(e) };
+  }
 }
 
 // 检测某 OpenAI 兼容端点上「实际可用」的嵌入模型：

@@ -1,4 +1,4 @@
-import { classifyModels } from "./modelClassifier";
+import { classifyModels, ensureCurrentOption } from "./modelClassifier";
 
 test("classifyModels 按用途粗分模型", () => {
   const out = classifyModels([
@@ -29,4 +29,11 @@ test("classifyModels 不把 whisper、tts、rerank 当聊天模型", () => {
 
 test("classifyModels 空输入返回空分组", () => {
   expect(classifyModels([])).toEqual({ chat: [], image: [], embed: [] });
+});
+
+test("ensureCurrentOption 把当前值并入候选(不在则置顶,在则原样,空值不塞)", () => {
+  expect(ensureCurrentOption(["a", "b"], "c")).toEqual(["c", "a", "b"]);
+  expect(ensureCurrentOption(["a", "b"], "a")).toEqual(["a", "b"]);
+  expect(ensureCurrentOption(["a", "b"], "")).toEqual(["a", "b"]);
+  expect(ensureCurrentOption([], "x")).toEqual(["x"]);
 });
