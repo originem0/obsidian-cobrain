@@ -1,4 +1,4 @@
-import { Plugin, Notice, TFile, Modal, App, normalizePath, debounce } from "obsidian";
+import { Plugin, Notice, TFile, Modal, App, normalizePath, debounce, Platform } from "obsidian";
 import { CobrainSettings, DEFAULT_SETTINGS, CobrainSettingTab } from "./settings";
 import { ApiEmbedder } from "./rag/apiEmbedder";
 import { VectorStore, type QueryHit } from "./rag/vectorStore";
@@ -51,7 +51,11 @@ export default class CobrainPlugin extends Plugin {
     this.addCommand({
       id: "cobrain-reindex",
       name: "Cobrain: 重建索引",
-      callback: () => this.indexer.reindexAll(() => this.persistIndex()),
+      callback: () => {
+        // 移动端为只读检索：不重建（避免蜂窝网重嵌 + 改写索引引发同步冲突），索引在桌面端建。
+        if (Platform.isMobile) { new Notice("移动端为只读检索，索引请在桌面端重建"); return; }
+        this.indexer.reindexAll(() => this.persistIndex());
+      },
     });
 
     this.addCommand({
@@ -63,16 +67,20 @@ export default class CobrainPlugin extends Plugin {
       }).open(),
     });
 
-    this.registerEvent(this.app.vault.on("modify", (f) => {
-      if (f instanceof TFile && f.extension === "md") this.scheduleReindex(f);
-    }));
-    this.registerEvent(this.app.vault.on("delete", (f) => {
-      // 文件在防抖窗口内被删：清掉待嵌入定时器，否则会把已删文件重新嵌回索引
-      const t = this.modifyTimers.get(f.path);
-      if (t) { clearTimeout(t); this.modifyTimers.delete(f.path); }
-      this.indexer.onDelete(f.path);
-      this.persistIndex();
-    }));
+    // 移动端只读：不注册自动重嵌（否则每改一篇笔记都走蜂窝网打嵌入接口，并重写 10MB 索引引发同步冲突）。
+    // 索引只在桌面端建，移动端读同步过来的索引做检索。
+    if (!Platform.isMobile) {
+      this.registerEvent(this.app.vault.on("modify", (f) => {
+        if (f instanceof TFile && f.extension === "md") this.scheduleReindex(f);
+      }));
+      this.registerEvent(this.app.vault.on("delete", (f) => {
+        // 文件在防抖窗口内被删：清掉待嵌入定时器，否则会把已删文件重新嵌回索引
+        const t = this.modifyTimers.get(f.path);
+        if (t) { clearTimeout(t); this.modifyTimers.delete(f.path); }
+        this.indexer.onDelete(f.path);
+        this.persistIndex();
+      }));
+    }
 
     console.log("Cobrain loaded");
   }
@@ -100,6 +108,9 @@ export default class CobrainPlugin extends Plugin {
   // 索引独立持久化到插件目录的 index.json，与 data.json（设置）彻底解耦：
   // 改设置不再重写整份索引，两条写路径也不会再 lost-update 互踩。
   async persistIndex(): Promise<void> {
+    // 移动端绝不写索引：堵住「文件同步非原子 → loadIndex 误判模型不符清空 → 空索引回传覆盖桌面索引」这条数据损坏链，
+    // 也避免两端并发写 10MB 文件产生同步冲突。兜住所有写索引路径（含 loadIndex 的 needsRewrite 回写）。
+    if (Platform.isMobile) return;
     const payload = { ...this.store.serialize(), embedModel: this.settings.embedModel };
     await this.app.vault.adapter.write(this.indexPath(), JSON.stringify(payload));
   }
