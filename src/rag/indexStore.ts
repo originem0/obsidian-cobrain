@@ -1,0 +1,116 @@
+import { App, PluginManifest, Platform, normalizePath } from "obsidian";
+import { VectorStore } from "./vectorStore";
+import { fnv1a64 } from "../util/hash";
+
+// 索引分片持久化：index/<hash64(path)>.json 每篇一片 + index/meta.json({v,embedModel})。
+// 改一篇只写它的分片(消灭整份重写)；移动端只读——所有写方法 no-op，杜绝双写冲突。
+const META = "meta.json";
+const SHARD_V = 3;
+
+export class IndexStore {
+  constructor(private app: App, private manifest: PluginManifest, private store: VectorStore) {}
+
+  private get adapter() { return this.app.vault.adapter; }
+  private base(): string { return this.manifest.dir ?? `${this.app.vault.configDir}/plugins/${this.manifest.id}`; }
+  private dir(): string { return normalizePath(`${this.base()}/index`); }
+  private metaPath(): string { return normalizePath(`${this.dir()}/${META}`); }
+  private legacyPath(): string { return normalizePath(`${this.base()}/index.json`); }
+  private shardName(path: string): string { return `${fnv1a64(path)}.json`; }
+  private shardPath(path: string): string { return normalizePath(`${this.dir()}/${this.shardName(path)}`); }
+
+  // 启动加载：优先 index/ 分片；否则迁移旧 index.json；返回存储的 embedModel(换模型检测用)。
+  async load(): Promise<string | undefined> {
+    if (await this.adapter.exists(this.dir())) {
+      let embedModel: string | undefined;
+      const listed = await this.adapter.list(this.dir());
+      for (const f of listed.files) {
+        const name = f.split("/").pop() ?? "";
+        if (name === META) {
+          try { embedModel = JSON.parse(await this.adapter.read(f)).embedModel || undefined; } catch { /* 坏 meta 忽略 */ }
+          continue;
+        }
+        if (!name.endsWith(".json")) continue;
+        try { this.store.deserializeFile(JSON.parse(await this.adapter.read(f))); }
+        catch (e) { console.error("Cobrain: 分片解析失败", f, e); }
+      }
+      // 同步可能把旧单文件 index.json 带回来：以 index/ 为准，清掉它
+      if (await this.adapter.exists(this.legacyPath())) await this.adapter.remove(this.legacyPath()).catch(() => {});
+      return embedModel;
+    }
+    // 迁移：旧单文件 index.json → 分片(首次加载一次性)。早于 #1 的 data.json.index 不再处理(那类装机早已迁移)。
+    if (await this.adapter.exists(this.legacyPath())) {
+      try {
+        const payload = JSON.parse(await this.adapter.read(this.legacyPath()));
+        this.store.deserialize(payload);
+        const embedModel = payload.embedModel as string | undefined;
+        await this.saveAll(embedModel);
+        await this.adapter.remove(this.legacyPath()).catch(() => {});
+        console.log("Cobrain: 已把 index.json 迁移为分片");
+        return embedModel;
+      } catch (e) {
+        console.error("Cobrain: 旧 index.json 迁移失败，按空索引处理", e);
+      }
+    }
+    return undefined;
+  }
+
+  async saveFile(path: string): Promise<void> {
+    if (Platform.isMobile) return;
+    const sf = this.store.serializeFile(path);
+    if (!sf) { await this.removeFile(path); return; }
+    await this.adapter.mkdir(this.dir()).catch(() => {});
+    await this.adapter.write(this.shardPath(path), JSON.stringify(sf));
+  }
+
+  async removeFile(path: string): Promise<void> {
+    if (Platform.isMobile) return;
+    const p = this.shardPath(path);
+    if (await this.adapter.exists(p)) await this.adapter.remove(p).catch(() => {});
+  }
+
+  async saveMeta(embedModel: string): Promise<void> {
+    if (Platform.isMobile) return;
+    await this.adapter.mkdir(this.dir()).catch(() => {});
+    await this.adapter.write(this.metaPath(), JSON.stringify({ v: SHARD_V, embedModel }));
+  }
+
+  // 全量写出所有分片 + meta + 清孤儿(迁移用)。
+  async saveAll(embedModel?: string): Promise<void> {
+    if (Platform.isMobile) return;
+    await this.adapter.mkdir(this.dir()).catch(() => {});
+    const wanted = new Set<string>([META]);
+    for (const path of this.store.allPaths()) {
+      const sf = this.store.serializeFile(path);
+      if (!sf) continue;
+      const name = this.shardName(path);
+      wanted.add(name);
+      await this.adapter.write(normalizePath(`${this.dir()}/${name}`), JSON.stringify(sf));
+    }
+    await this.adapter.write(this.metaPath(), JSON.stringify({ v: SHARD_V, embedModel: embedModel ?? "" }));
+    await this.sweep(wanted);
+  }
+
+  // 重建结束：写 meta + 清掉当前笔记集合之外的孤儿分片(改名/旧残留)。
+  async finalize(embedModel: string): Promise<void> {
+    if (Platform.isMobile) return;
+    const wanted = new Set<string>([META]);
+    for (const path of this.store.allPaths()) wanted.add(this.shardName(path));
+    await this.saveMeta(embedModel);
+    await this.sweep(wanted);
+  }
+
+  private async sweep(wanted: Set<string>): Promise<void> {
+    if (!(await this.adapter.exists(this.dir()))) return;
+    const listed = await this.adapter.list(this.dir());
+    for (const f of listed.files) {
+      const name = f.split("/").pop() ?? "";
+      if (name.endsWith(".json") && !wanted.has(name)) await this.adapter.remove(f).catch(() => {});
+    }
+  }
+
+  // 换嵌入模型/清空：删掉整个 index/(store 已在外层 deserialize(null))。
+  async clearAll(): Promise<void> {
+    if (Platform.isMobile) return;
+    if (await this.adapter.exists(this.dir())) await this.adapter.rmdir(this.dir(), true).catch(() => {});
+  }
+}
