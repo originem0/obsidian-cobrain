@@ -231,8 +231,9 @@ export class ChatView extends ItemView {
     const notice = new Notice("整理成笔记中…", 0);
     try {
       const { title, body } = await this.plugin.tutor.summarizeNote(this.history);
+      // 只附用户的提问（原始问题），不含 AI 回答
       const conversation = this.plugin.settings.appendConversation
-        ? this.history.map(m => `**${m.role === "user" ? "你" : "副脑"}**：${m.content}`).join("\n\n")
+        ? this.history.filter(m => m.role === "user").map(m => `**你**：${m.content}`).join("\n\n")
         : null;
       const path = await saveNote(this.app, this.plugin.settings, {
         title,

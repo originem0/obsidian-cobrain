@@ -8,7 +8,7 @@ export interface NotePayload {
   sources: string[];
   mermaid?: string | null;
   imageEmbed?: string | null;
-  conversation?: string | null; // 原始对话（appendConversation 开启时附在末尾）
+  conversation?: string | null; // 原始问题（appendConversation 开启时把用户提问附在末尾）
 }
 
 async function ensureFolder(app: App, folder: string): Promise<void> {
@@ -35,7 +35,7 @@ export async function saveNote(app: App, settings: CobrainSettings, p: NotePaylo
     for (const s of p.sources) parts.push(`- [[${s.replace(/\.md$/, "")}]]`);
   }
   if (p.conversation) {
-    parts.push("", "## 原始对话", "", p.conversation);
+    parts.push("", "## 原始问题", "", p.conversation);
   }
   const content = parts.join("\n");
 

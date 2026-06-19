@@ -19,7 +19,7 @@ export interface CobrainSettings {
   noteFolder: string;
   attachmentFolder: string;
   noteTags: string;             // 逗号分隔，写入笔记 frontmatter tags
-  appendConversation: boolean;  // 存笔记时是否附原始对话
+  appendConversation: boolean;  // 存笔记时是否附上你的提问（原始问题，不含 AI 回答）
   conceptMapDirection: string;  // Mermaid 方向：TD / LR
   conceptMapDetail: string;     // 概念图详细度：简 / 中 / 详
   tutorPrompt: string;          // 导师系统提示词
@@ -277,8 +277,8 @@ export class CobrainSettingTab extends PluginSettingTab {
     this.text(body, "附件目录", "配图保存目录", "attachmentFolder");
     this.text(body, "标签", "逗号分隔，写入 frontmatter tags", "noteTags");
     new Setting(body)
-      .setName("附原始对话")
-      .setDesc("存笔记时在末尾附上完整对话记录")
+      .setName("附原始问题")
+      .setDesc("存笔记时在末尾附上你的提问（不含 AI 回答）")
       .addToggle(t =>
         t.setValue(s.appendConversation).onChange(async v => {
           s.appendConversation = v;
