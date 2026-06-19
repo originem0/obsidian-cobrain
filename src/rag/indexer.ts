@@ -13,17 +13,19 @@ export class Indexer {
     private store: VectorStore
   ) {}
 
-  private async indexFile(file: TFile): Promise<void> {
+  // 返回是否真正改动了索引（true=重嵌/删除，false=哈希命中只同步了 mtime）。
+  // 调用方据此决定是否落分片，省掉无实质变化的分片重写。
+  private async indexFile(file: TFile): Promise<boolean> {
     const content = await this.app.vault.cachedRead(file);
     const hash = fnv1a(content);
     // 内容哈希未变（即便 mtime 变了）：跳过重嵌，仅同步 mtime，省下嵌入 API 调用。
     // 覆盖「保存但无实质改动 / 重复重建 / 外部 touch」。块级增量 diff 留待后续，文件级是 80/20。
     if (this.store.getHash(file.path) === hash) {
       this.store.setMtime(file.path, file.stat.mtime);
-      return;
+      return false;
     }
     const chunks = chunkMarkdown(content);
-    if (chunks.length === 0) { this.store.removeFile(file.path); return; }
+    if (chunks.length === 0) { this.store.removeFile(file.path); return true; }
     const vectors = await this.embedder.embedDocuments(chunks.map(c => c.text));
     this.store.setFile(
       file.path,
@@ -31,6 +33,7 @@ export class Indexer {
       chunks.map((c, i) => ({ text: c.text, heading: c.heading, vector: vectors[i] }))
     );
     this.store.setHash(file.path, hash);
+    return true;
   }
 
   // 全量：跳过 mtime 未变的文件；删除已不存在文件的分片；每篇即时落分片(崩溃不丢进度)，结束写 meta + 清孤儿。
@@ -49,8 +52,8 @@ export class Indexer {
       for (const f of files) {
         if (this.store.getMtime(f.path) !== f.stat.mtime) {
           try {
-            await this.indexFile(f);
-            await persist.saveFile(f.path);
+            const changed = await this.indexFile(f);
+            if (changed) await persist.saveFile(f.path);
           } catch (e) {
             // 单篇失败(如嵌入 API 抖动)不中断整轮；记数继续，结束时汇报
             failed++;
@@ -70,7 +73,7 @@ export class Indexer {
     }
   }
 
-  // 增量：单文件变更/删除
-  async onModify(file: TFile): Promise<void> { await this.indexFile(file); }
+  // 增量：单文件变更/删除。onModify 透传 changed，供调用方决定是否落分片。
+  async onModify(file: TFile): Promise<boolean> { return this.indexFile(file); }
   onDelete(path: string): void { this.store.removeFile(path); }
 }

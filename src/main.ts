@@ -49,8 +49,17 @@ export default class CobrainPlugin extends Plugin {
     this.image = new ImageClient(this.settings);
 
     this.registerView(VIEW_TYPE_COBRAIN_CHAT, (leaf) => new ChatView(leaf, this));
-    // 改名收尾：清掉旧视图类型 "lt-chat" 残留的孤儿面板（改名后该类型已不再注册）
-    this.app.workspace.onLayoutReady(() => this.app.workspace.detachLeavesOfType("lt-chat"));
+    this.app.workspace.onLayoutReady(() => {
+      // 改名收尾：清掉旧视图类型 "lt-chat" 残留的孤儿面板（改名后该类型已不再注册）
+      this.app.workspace.detachLeavesOfType("lt-chat");
+      // 新建笔记自动入索引：放 onLayoutReady 内注册，避开启动时对每个已存文件触发 create 的风暴。
+      // 「存为笔记」/模板/同步进来的新笔记走 vault.create → 由此自动入索引（移动端只读，不注册）。
+      if (!Platform.isMobile) {
+        this.registerEvent(this.app.vault.on("create", (f) => {
+          if (f instanceof TFile && f.extension === "md") this.scheduleReindex(f);
+        }));
+      }
+    });
     this.addRibbonIcon("brain", "创作副脑", () => this.activateChatView());
     this.addCommand({
       id: "cobrain-open-tutor",
@@ -149,7 +158,7 @@ export default class CobrainPlugin extends Plugin {
         if (this.disposed) return; // 卸载后不再写盘
         this.indexer
           .onModify(file)
-          .then(() => this.indexStore.saveFile(file.path))
+          .then((changed) => { if (changed) return this.indexStore.saveFile(file.path); })
           .catch((e) =>
             new Notice(`索引更新失败：${file.path}：${e instanceof Error ? e.message : String(e)}`),
           );

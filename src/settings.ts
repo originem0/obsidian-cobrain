@@ -1,4 +1,4 @@
-import { App, PluginSettingTab, Setting, Notice, DropdownComponent } from "obsidian";
+import { App, PluginSettingTab, Setting, Notice, DropdownComponent, Platform } from "obsidian";
 import { classifyModels, detectEmbeddingModels, listModels, testChat } from "./llm/probe";
 import { ensureCurrentOption } from "./llm/modelClassifier";
 import type CobrainPlugin from "./main";
@@ -191,6 +191,12 @@ export class CobrainSettingTab extends PluginSettingTab {
         for (const item of detectedOptions) d.addOption(item.value, item.label);
         d.setValue(s[opts.modelKey]).onChange(async v => {
           if (v === s[opts.modelKey]) return;
+          // 移动端只读：换嵌入模型会清空索引并要求重建，而移动端无法重建——撤销 UI 选择、不改设置。
+          if (opts.kind === "embed" && Platform.isMobile) {
+            d.setValue(s[opts.modelKey]);
+            new Notice("嵌入模型请在桌面端更换（移动端只读）");
+            return;
+          }
           s[opts.modelKey] = v;
           this.status[opts.kind] = { state: "untested" };
           if (opts.kind === "embed") {

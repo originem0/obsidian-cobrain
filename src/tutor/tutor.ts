@@ -25,8 +25,9 @@ export class Tutor {
         : "";
       return { context, sources, hits };
     } catch (e) {
-      // 检索失败（如维度不一致）不阻断对话
-      return { context: `（检索暂不可用：${e instanceof Error ? e.message : String(e)}）`, sources: [], hits: [] };
+      // 检索失败（如维度不一致）不阻断对话：context 置空，错误只记日志，不把错误串当 system 消息注入 LLM
+      console.error("Cobrain: 检索失败", e);
+      return { context: "", sources: [], hits: [] };
     }
   }
 
