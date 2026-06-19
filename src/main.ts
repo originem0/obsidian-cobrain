@@ -8,7 +8,7 @@ import { ChatClient } from "./llm/chatClient";
 import { Tutor } from "./tutor/tutor";
 import { ChatView, VIEW_TYPE_COBRAIN_CHAT } from "./ui/chatView";
 import { ImageClient } from "./llm/imageClient";
-import { buildQuote, findHeadingAbove } from "./util/quote";
+import { buildQuote, findHeadingAbove, extractContext } from "./util/quote";
 
 export default class CobrainPlugin extends Plugin {
   settings!: CobrainSettings;
@@ -213,7 +213,7 @@ export default class CobrainPlugin extends Plugin {
     return leaf.view instanceof ChatView ? leaf.view : null;
   }
 
-  // 选中文本 → 引用进 Cobrain：取选区 + 来源链接 + 最近标题，预填进对话面板输入框（不自动发）。
+  // 选中文本 → 引用进 Cobrain：取选区 + 来源链接 + 最近标题 + 所在小节，预填进面板（不自动发）。
   private async quoteSelection(editor: Editor, ctx: MarkdownFileInfo): Promise<void> {
     const sel = editor.getSelection();
     if (!sel.trim()) { new Notice("先选中一段文字"); return; }
@@ -221,9 +221,11 @@ export default class CobrainPlugin extends Plugin {
     if (!file) { new Notice("无法确定来源文件"); return; }
     const linktext = this.app.metadataCache.fileToLinktext(file, "", true);
     const lines = editor.getValue().split("\n");
-    const heading = findHeadingAbove(lines, editor.getCursor("from").line);
+    const fromLine = editor.getCursor("from").line;
+    const heading = findHeadingAbove(lines, fromLine);
+    const sourceContext = extractContext(lines, fromLine);
     const view = await this.activateChatView();
-    view?.quoteIntoInput(buildQuote(sel, linktext, heading));
+    view?.quoteIntoInput(buildQuote(sel, linktext, heading), sourceContext);
   }
 }
 

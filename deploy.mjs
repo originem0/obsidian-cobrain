@@ -9,7 +9,7 @@ const dest =
 
 await mkdir(dest, { recursive: true });
 // 只拷构建产物与清单；data.json 是 vault 侧的用户数据（设置+索引），绝不覆盖
-for (const f of ["main.js", "manifest.json"]) {
+for (const f of ["main.js", "manifest.json", "styles.css"]) {
   await copyFile(f, path.join(dest, f));
   console.log(`[deploy] ${f} → ${dest}`);
 }

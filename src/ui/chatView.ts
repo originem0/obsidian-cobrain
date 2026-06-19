@@ -18,6 +18,7 @@ export class ChatView extends ItemView {
   private inputEl!: HTMLTextAreaElement;
   private sendBtn!: HTMLButtonElement;
   private busy = false; // 一次只跑一轮 ask，避免连发导致 history 交错
+  private pendingSourceContext: string | null = null; // 引用带来的源笔记小节，只喂给紧接着的那一问
 
   constructor(leaf: WorkspaceLeaf, private plugin: CobrainPlugin) {
     super(leaf);
@@ -30,63 +31,61 @@ export class ChatView extends ItemView {
   async onOpen(): Promise<void> {
     const root = this.contentEl;
     root.empty();
-    root.style.cssText = "display:flex; flex-direction:column; height:100%;";
+    root.addClass("cobrain-root");
 
-    this.messagesEl = root.createDiv();
-    this.messagesEl.style.cssText = "flex:1; overflow-y:auto; padding:8px;";
-    const w = this.messagesEl.createDiv();
-    w.style.cssText = "opacity:0.55; padding:8px; font-size:0.9em;";
-    w.setText("跟它聊一个你正在想的东西——它会从你 vault 里翻出你写过的相关旧笔记摊到眼前，并回抛问题逼你自己想，而不是讲给你听。下方按钮：概念图 / 配图 / 存为笔记。");
+    this.messagesEl = root.createDiv({ cls: "cobrain-messages" });
+    this.messagesEl.createDiv({
+      cls: "cobrain-welcome",
+      text: "聊你正在想的——我会翻出你写过的相关旧笔记摊到眼前，并回抛问题逼你自己想。下方：概念图 / 配图 / 存为笔记。",
+    });
 
-    const bar = root.createDiv();
-    bar.style.cssText =
-      "display:flex; gap:6px; padding:4px 8px; flex-wrap:wrap; border-top:1px solid var(--background-modifier-border);";
+    const bar = root.createDiv({ cls: "cobrain-bar" });
     this.makeBtn(bar, "概念图", () => void this.doConceptMap());
     this.makeBtn(bar, "配图", () => this.doImage());
     this.makeBtn(bar, "存为笔记", () => void this.doSaveNote());
 
-    const iw = root.createDiv();
-    iw.style.cssText =
-      "display:flex; gap:6px; padding:8px; border-top:1px solid var(--background-modifier-border);";
+    const iw = root.createDiv({ cls: "cobrain-inputrow" });
     this.inputEl = iw.createEl("textarea", {
-      attr: { rows: "2", placeholder: "问副脑…（Enter 发送，Shift+Enter 换行）" },
+      cls: "cobrain-input",
+      attr: { rows: "1", placeholder: "问副脑…（Enter 发送，Shift+Enter 换行）" },
     });
-    this.inputEl.style.cssText = "flex:1; resize:none;";
     this.sendBtn = iw.createEl("button", { text: "发送" });
     this.sendBtn.onclick = () => void this.send();
+    this.inputEl.addEventListener("input", () => this.autoGrow());
     this.inputEl.addEventListener("keydown", e => {
       if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
         void this.send();
       }
     });
+    this.autoGrow();
+  }
+
+  // 输入框随内容长高；上限与滚动由 CSS（.cobrain-input 的 max-height/overflow）封顶。
+  private autoGrow(): void {
+    this.inputEl.style.height = "auto";
+    this.inputEl.style.height = this.inputEl.scrollHeight + "px";
   }
 
   private makeBtn(parent: HTMLElement, text: string, fn: () => void): void {
     const b = parent.createEl("button", { text });
-    b.style.fontSize = "0.85em";
     b.onclick = fn;
   }
 
   private addBubble(role: "user" | "assistant", text: string, sources?: string[]): HTMLElement {
-    const b = this.messagesEl.createDiv();
-    b.style.cssText = `margin:8px 0; padding:8px 10px; border-radius:8px; background:var(${
-      role === "user" ? "--background-secondary" : "--background-primary-alt"
-    });`;
-    const who = b.createEl("div", { text: role === "user" ? "你" : "副脑" });
-    who.style.cssText = "font-size:0.72em; opacity:0.55; margin-bottom:4px;";
+    const b = this.messagesEl.createDiv({ cls: `cobrain-bubble cobrain-bubble-${role === "user" ? "user" : "ai"}` });
+    b.createDiv({ cls: "cobrain-who", text: role === "user" ? "你" : "副脑" });
     const body = b.createDiv();
     if (role === "assistant") void MarkdownRenderer.render(this.app, text, body, "", this);
     else body.setText(text);
     if (sources?.length) {
-      const s = b.createEl("div", { text: "来源：" + sources.map(p => p.split("/").pop()).join("、") });
-      s.style.cssText = "font-size:0.72em; opacity:0.5; margin-top:6px;";
+      b.createDiv({ cls: "cobrain-srcline", text: "来源：" + sources.map(p => p.split("/").pop()).join("、") });
     }
     this.messagesEl.scrollTop = this.messagesEl.scrollHeight;
     return b;
   }
 
-  // 把检索命中的旧笔记显式列出来、可点开——让 vault 主动「撞」你，而不是悄悄喂给模型（第二大脑「联想」）
+  // 把检索命中的旧笔记显式列出来、可点开——让 vault 主动「撞」你（第二大脑「联想」）
   private addRelatedBlock(hits: QueryHit[]): void {
     if (!hits.length) return;
     const seen = new Set<string>();
@@ -95,19 +94,13 @@ export class ChatView extends ItemView {
       seen.add(h.path);
       return true;
     });
-    const wrap = this.messagesEl.createDiv();
-    wrap.style.cssText =
-      "margin:8px 0; padding:6px 10px; border-left:2px solid var(--interactive-accent); background:var(--background-secondary); border-radius:4px;";
-    const head = wrap.createEl("div", { text: "你写过的（点开撞一撞）" });
-    head.style.cssText = "font-size:0.72em; opacity:0.55; margin-bottom:4px;";
+    const wrap = this.messagesEl.createDiv({ cls: "cobrain-related" });
+    wrap.createDiv({ cls: "cobrain-related-head", text: "你写过的（点开撞一撞）" });
     uniq.slice(0, 5).forEach(h => {
-      const item = wrap.createDiv();
-      item.style.cssText = "margin:3px 0; cursor:pointer;";
+      const item = wrap.createDiv({ cls: "cobrain-related-item" });
       const title = (h.path.split("/").pop() ?? h.path).replace(/\.md$/, "") + (h.heading ? " › " + h.heading : "");
-      const t = item.createEl("div", { text: title });
-      t.style.cssText = "font-size:0.85em; color:var(--text-accent);";
-      const s = item.createEl("div", { text: h.text.slice(0, 80) + (h.text.length > 80 ? "…" : "") });
-      s.style.cssText = "font-size:0.78em; opacity:0.5;";
+      item.createDiv({ cls: "cobrain-related-title", text: title });
+      item.createDiv({ cls: "cobrain-related-snippet", text: h.text.slice(0, 80) + (h.text.length > 80 ? "…" : "") });
       item.onclick = () => this.app.workspace.openLinkText(h.path, "", false);
     });
     this.messagesEl.scrollTop = this.messagesEl.scrollHeight;
@@ -134,22 +127,28 @@ export class ChatView extends ItemView {
     this.sendBtn.disabled = false;
   }
 
-  // 把"引用"(来源链接 + 原文)预填进输入框：已有内容则插在前面、保留你的字；光标停在引用之后。
-  quoteIntoInput(text: string): void {
+  // 把"引用"(来源链接 + 原文)预填进输入框；来源上下文暂存，喂给紧接着的那一问。
+  quoteIntoInput(text: string, sourceContext?: string): void {
+    this.pendingSourceContext = sourceContext ?? null;
     this.inputEl.value = text + this.inputEl.value;
     this.inputEl.focus();
     this.inputEl.setSelectionRange(text.length, text.length);
+    this.autoGrow();
+    this.inputEl.scrollTop = 0; // 引用在顶部，确保可见
   }
 
   private async send(): Promise<void> {
     const text = this.inputEl.value.trim();
     if (!text) return;
     if (!this.acquire()) return;
+    const sourceContext = this.pendingSourceContext; // 消费一次：仅这一问带来源上下文
+    this.pendingSourceContext = null;
     this.inputEl.value = "";
+    this.autoGrow();
     this.addBubble("user", text);
     const thinking = this.addBubble("assistant", "思考中…");
     try {
-      const { reply, sources, related } = await this.plugin.tutor.ask(this.history, text);
+      const { reply, sources, related } = await this.plugin.tutor.ask(this.history, text, sourceContext ?? undefined);
       thinking.remove();
       // 先把你自己写过的相关旧笔记摊到眼前（第二大脑「联想」），再看导师的回应
       this.addRelatedBlock(related);
