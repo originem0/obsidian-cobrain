@@ -84,3 +84,29 @@ test("兼容旧 float64 格式（entry 带 vector 数组、无 q）", () => {
   const hits = s.query([1, 0], 1);
   expect(hits[0].text).toBe("猫");
 });
+
+test("serializeFile 取单篇（量化、不含其它笔记、无则 null）", () => {
+  const s = new VectorStore();
+  s.setFile("a.md", 1, [{ text: "猫", heading: "", vector: [0.6, 0.8] }]);
+  s.setHash("a.md", "h1");
+  s.setFile("b.md", 2, [{ text: "狗", heading: "", vector: [0.8, 0.6] }]);
+  const sf = s.serializeFile("a.md")!;
+  expect(sf.path).toBe("a.md");
+  expect(sf.mtime).toBe(1);
+  expect(sf.hash).toBe("h1");
+  expect(sf.entries.length).toBe(1);
+  expect(typeof sf.entries[0].q).toBe("string");
+  expect((sf.entries[0] as any).path).toBeUndefined();
+  expect(s.serializeFile("missing.md")).toBeNull();
+});
+
+test("serializeFile→deserializeFile 往返：命中与 mtime 保留", () => {
+  const s = new VectorStore();
+  s.setFile("a.md", 7, [{ text: "猫", heading: "H", vector: [0.6, 0.8] }]);
+  const s2 = new VectorStore();
+  s2.deserializeFile(s.serializeFile("a.md")!);
+  const hit = s2.query([0.6, 0.8], 1)[0];
+  expect(hit.text).toBe("猫");
+  expect(hit.heading).toBe("H");
+  expect(s2.getMtime("a.md")).toBe(7);
+});

@@ -89,5 +89,33 @@ export class VectorStore {
     this.hashes = data?.hashes ?? {};
   }
 
+  // 单篇分片序列化：entries 省去 path(在顶层)以减小体积；该篇无条目返回 null。
+  serializeFile(path: string): { path: string; mtime: number; hash: string; entries: Omit<StoredEntry, "path">[] } | null {
+    const es = this.entries.filter(e => e.path === path);
+    if (!es.length) return null;
+    const entries = es.map(e => {
+      const { scale, q } = quantizeVector(e.vector);
+      return { chunkIdx: e.chunkIdx, text: e.text, heading: e.heading, scale, q };
+    });
+    return { path, mtime: this.mtimes[path] ?? 0, hash: this.hashes[path] ?? "", entries };
+  }
+
+  // 把单篇分片合并进 store(追加条目 + 设 mtime/hash)。兼容 q(量化) 与 vector(旧)。
+  deserializeFile(payload: { path: string; mtime?: number; hash?: string; entries?: unknown[] }): void {
+    const path = payload.path;
+    const raw = (payload.entries ?? []) as Array<Record<string, unknown>>;
+    for (const e of raw) {
+      this.entries.push({
+        path,
+        chunkIdx: e.chunkIdx as number,
+        text: e.text as string,
+        heading: e.heading as string,
+        vector: typeof e.q === "string" ? dequantizeVector(e.scale as number, e.q) : ((e.vector as number[]) ?? []),
+      });
+    }
+    if (payload.mtime != null) this.mtimes[path] = payload.mtime;
+    if (payload.hash != null) this.hashes[path] = payload.hash;
+  }
+
   allPaths(): string[] { return Object.keys(this.mtimes); }
 }
