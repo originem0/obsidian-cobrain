@@ -35,11 +35,16 @@ export class ImageClient {
     if (res.status !== 200) {
       throw new Error(`图像 API ${res.status}：${(res.text || "").slice(0, 200)}`);
     }
-    const item = res.json?.data?.[0];
-    if (item?.b64_json) return base64ToArrayBuffer(item.b64_json);
-    if (item?.url) {
-      const img = await withTimeout(requestUrl({ url: item.url, throw: false }), IMAGE_TIMEOUT_MS, "下载图片");
-      if (img.status === 200) return img.arrayBuffer;
+    const json: unknown = res.json;
+    const item = json && typeof json === "object" && "data" in json && Array.isArray(json.data) ? json.data[0] : undefined;
+    if (item && typeof item === "object") {
+      if ("b64_json" in item && typeof item.b64_json === "string") {
+        return base64ToArrayBuffer(item.b64_json);
+      }
+      if ("url" in item && typeof item.url === "string") {
+        const img = await withTimeout(requestUrl({ url: item.url, throw: false }), IMAGE_TIMEOUT_MS, "下载图片");
+        if (img.status === 200) return img.arrayBuffer;
+      }
     }
     throw new Error("图像 API 未返回图片数据");
   }

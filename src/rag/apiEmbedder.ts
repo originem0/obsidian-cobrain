@@ -39,9 +39,17 @@ export class ApiEmbedder implements Embedder {
         "嵌入 API",
       );
       if (res.status === 200) {
-        const data = (res.json.data as { embedding: number[]; index: number }[])
-          .slice()
-          .sort((a, b) => a.index - b.index);
+        const json: unknown = res.json;
+        if (!json || typeof json !== "object" || !("data" in json) || !Array.isArray(json.data)) {
+          throw new Error("嵌入 API 返回格式异常：缺少 data 数组");
+        }
+        const data: Array<{ embedding: number[]; index: number }> = [];
+        for (const item of json.data) {
+          if (item && typeof item === "object" && "embedding" in item && Array.isArray(item.embedding) && "index" in item && typeof item.index === "number") {
+            data.push({ embedding: item.embedding as number[], index: item.index });
+          }
+        }
+        data.sort((a, b) => a.index - b.index);
         const vecs = data.map(d => normalize(d.embedding));
         return vecs;
       }

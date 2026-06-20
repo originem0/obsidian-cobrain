@@ -152,7 +152,8 @@ export default class CobrainPlugin extends Plugin {
   // data.json 现在只存设置；向量索引在 index/ 分片里（见 IndexStore）。
   async loadSettings() {
     const data = await this.loadData();
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, data?.settings);
+    // loadData 返回 any，我们知道它要么是 null/undefined 要么是带 settings 的对象
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, (data && typeof data === "object" && "settings" in data) ? data.settings : {});
   }
 
   // 只写设置（极小）。索引在 index/ 分片里，与设置彻底解耦。

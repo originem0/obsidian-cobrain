@@ -27,7 +27,11 @@ export class IndexStore {
       for (const f of listed.files) {
         const name = f.split("/").pop() ?? "";
         if (name === META) {
-          try { embedModel = JSON.parse(await this.adapter.read(f)).embedModel || undefined; } catch { /* 坏 meta 忽略 */ }
+          try {
+            const parsed: unknown = JSON.parse(await this.adapter.read(f));
+            embedModel = (parsed && typeof parsed === "object" && "embedModel" in parsed && typeof parsed.embedModel === "string")
+              ? parsed.embedModel : undefined;
+          } catch { /* 坏 meta 忽略 */ }
           continue;
         }
         if (name.endsWith(".json")) shards.push(f);
@@ -51,9 +55,12 @@ export class IndexStore {
     // 迁移：旧单文件 index.json → 分片(首次加载一次性)。早于 #1 的 data.json.index 不再处理(那类装机早已迁移)。
     if (await this.adapter.exists(this.legacyPath())) {
       try {
-        const payload = JSON.parse(await this.adapter.read(this.legacyPath()));
-        this.store.deserialize(payload);
-        const embedModel = payload.embedModel as string | undefined;
+        const payload: unknown = JSON.parse(await this.adapter.read(this.legacyPath()));
+        // deserialize 期望特定形状，验证后传入
+        const shaped = (payload && typeof payload === "object") ? payload as { entries?: unknown[]; mtimes?: Record<string, number>; hashes?: Record<string, string> } : null;
+        this.store.deserialize(shaped);
+        const embedModel = (payload && typeof payload === "object" && "embedModel" in payload && typeof payload.embedModel === "string")
+          ? payload.embedModel : undefined;
         await this.saveAll(embedModel);
         await this.adapter.remove(this.legacyPath()).catch(() => {});
         return embedModel;

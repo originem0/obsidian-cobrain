@@ -36,7 +36,12 @@ export class ChatClient {
     if (res.status !== 200) {
       throw new Error(`聊天 API ${res.status}：${(res.text || "").slice(0, 200)}`);
     }
-    const content = res.json?.choices?.[0]?.message?.content;
+    const json: unknown = res.json;
+    const content =
+      json && typeof json === "object" && "choices" in json && Array.isArray(json.choices) && json.choices[0]
+        && typeof json.choices[0] === "object" && "message" in json.choices[0]
+        && json.choices[0].message && typeof json.choices[0].message === "object" && "content" in json.choices[0].message
+        ? json.choices[0].message.content : undefined;
     if (typeof content !== "string") throw new Error("聊天 API 返回格式异常");
     return content;
   }

@@ -179,12 +179,13 @@ export class CobrainSettingTab extends PluginSettingTab {
               );
             }
             notice.hide();
-            this.display();
-          } catch (e: any) {
+            this.refreshModelDropdown(opts.kind);
+          } catch (e) {
             notice.hide();
             this.status[opts.kind] = { state: "fail", text: "检测失败" };
-            new Notice("检测失败：" + (e?.message ?? String(e)));
-            this.display();
+            this.paintStatus(this.statusEls[opts.kind]!, this.status[opts.kind]);
+            const msg = e instanceof Error ? e.message : String(e);
+            new Notice("检测失败：" + msg);
           }
         }),
       )
@@ -230,11 +231,12 @@ export class CobrainSettingTab extends PluginSettingTab {
                 ? { state: "ok", text: `已连通 · ${r.ms}ms` }
                 : { state: "fail", text: r.error ?? "测试失败" };
               new Notice(r.ok ? `聊天模型可用（${r.ms}ms）` : `聊天模型不可用：${r.error ?? "未知错误"}`);
-            } catch (e: any) {
-              this.status.chat = { state: "fail", text: e?.message ?? String(e) };
-              new Notice("测试失败：" + (e?.message ?? String(e)));
+            } catch (e) {
+              const msg = e instanceof Error ? e.message : String(e);
+              this.status.chat = { state: "fail", text: msg };
+              new Notice("测试失败：" + msg);
             }
-            this.display();
+            this.paintStatus(this.statusEls.chat!, this.status.chat);
           }),
         );
     }

@@ -20,12 +20,13 @@ export async function listModels(baseUrl: string, apiKey: string): Promise<strin
   if (res.status !== 200) {
     throw new Error(`拉取 /models 失败：HTTP ${res.status} ${(res.text || "").slice(0, 200)}`);
   }
-  const data = res.json?.data;
+  const json: unknown = res.json;
+  const data = json && typeof json === "object" && "data" in json ? json.data : undefined;
   if (!Array.isArray(data)) {
     throw new Error("拉取 /models 失败：返回体里没有模型数组");
   }
-  return (data as Array<{ id?: unknown }>)
-    .map(m => m?.id)
+  return data
+    .map(m => (m && typeof m === "object" && "id" in m ? m.id : undefined))
     .filter((id): id is string => typeof id === "string" && id.length > 0);
 }
 
@@ -89,7 +90,14 @@ export async function detectEmbeddingModels(
             PROBE_TIMEOUT_MS,
             "探测嵌入模型",
           );
-          const dim = r.status === 200 ? r.json?.data?.[0]?.embedding?.length ?? 0 : 0;
+          let dim = 0;
+          if (r.status === 200) {
+            const json: unknown = r.json;
+            const emb = json && typeof json === "object" && "data" in json && Array.isArray(json.data)
+              && json.data[0] && typeof json.data[0] === "object" && "embedding" in json.data[0]
+              && Array.isArray(json.data[0].embedding) ? json.data[0].embedding : undefined;
+            dim = emb?.length ?? 0;
+          }
           return dim > 0 ? { id, dim } : null;
         } catch {
           return null;
