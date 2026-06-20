@@ -131,6 +131,10 @@ export default class CobrainPlugin extends Plugin {
 
   // 后台加载索引分片 + 换模型检测。onload 不 await 它（只存其 Promise 供检索/重嵌前 await）。
   private async loadIndex(): Promise<void> {
+    // 先等布局就绪：索引加载有 ~130ms 同步主线程工作（解析 + 反量化），别在「打开软件」的启动窗口里抢主线程，
+    // 让 Obsidian 先渲染可用，重活儿挪到 app 已经能用之后再做。
+    await new Promise<void>(resolve => this.app.workspace.onLayoutReady(resolve));
+    if (this.disposed) return;
     const storedModel = await this.indexStore.load();
     if (this.disposed) return; // 加载期间插件被卸载：不再动设置/盘
     if (storedModel && storedModel !== this.settings.embedModel) {
