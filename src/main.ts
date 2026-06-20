@@ -59,14 +59,14 @@ export default class CobrainPlugin extends Plugin {
     });
     this.addRibbonIcon("brain", "创作副脑", () => this.activateChatView());
     this.addCommand({
-      id: "cobrain-open-tutor",
-      name: "Cobrain: 打开创作副脑",
+      id: "open-tutor",
+      name: "打开创作副脑",
       callback: () => this.activateChatView(),
     });
 
     this.addCommand({
-      id: "cobrain-reindex",
-      name: "Cobrain: 重建索引",
+      id: "reindex",
+      name: "重建索引",
       callback: async () => {
         // 移动端为只读检索：不重建（避免蜂窝网重嵌 + 改写索引引发同步冲突），索引在桌面端建。
         if (Platform.isMobile) { new Notice("移动端为只读检索，索引请在桌面端重建"); return; }
@@ -76,8 +76,8 @@ export default class CobrainPlugin extends Plugin {
     });
 
     this.addCommand({
-      id: "cobrain-test-retrieval",
-      name: "Cobrain: 测试检索",
+      id: "test-retrieval",
+      name: "测试检索",
       callback: () => new QueryModal(this.app, async (q) => {
         const hits = await this.retriever.retrieve(q, 8);
         new ResultsModal(this.app, q, hits).open();
@@ -85,8 +85,8 @@ export default class CobrainPlugin extends Plugin {
     });
 
     this.addCommand({
-      id: "cobrain-quote-selection",
-      name: "Cobrain: 引用选中文本",
+      id: "quote-selection",
+      name: "引用选中文本",
       editorCallback: (editor, ctx) => void this.quoteSelection(editor, ctx),
     });
 
@@ -126,7 +126,6 @@ export default class CobrainPlugin extends Plugin {
 
     // onload 已把视图/命令/事件全部接好，最后才后台启动索引加载——onload 不被它阻塞，告警消失。
     this.indexReady = this.loadIndex();
-    console.log("Cobrain loaded");
   }
 
   // 后台加载索引分片 + 换模型检测。onload 不 await 它（只存其 Promise 供检索/重嵌前 await）。
@@ -151,7 +150,6 @@ export default class CobrainPlugin extends Plugin {
     this.disposed = true;
     for (const t of this.modifyTimers.values()) clearTimeout(t);
     this.modifyTimers.clear();
-    console.log("Cobrain unloaded");
   }
 
   // data.json 现在只存设置；向量索引在 index/ 分片里（见 IndexStore）。

@@ -56,7 +56,6 @@ export class IndexStore {
         const embedModel = payload.embedModel as string | undefined;
         await this.saveAll(embedModel);
         await this.adapter.remove(this.legacyPath()).catch(() => {});
-        console.log("Cobrain: 已把 index.json 迁移为分片");
         return embedModel;
       } catch (e) {
         console.error("Cobrain: 旧 index.json 迁移失败，按空索引处理", e);
