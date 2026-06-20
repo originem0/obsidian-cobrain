@@ -1,0 +1,59 @@
+name: Release
+
+# 推送形如 0.1.9 的 tag 时触发：构建 → 生成构建溯源签名(attestation) → 发布 GitHub Release。
+# 取代本地 `gh release create`：发版只需 bump 版本号、提交、`git tag <ver> && git push origin <ver>`。
+on:
+  push:
+    tags:
+      - "*"
+
+permissions:
+  contents: write      # 创建 release、上传产物
+  id-token: write      # attestation 走 OIDC
+  attestations: write  # 写构建溯源签名
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      # 用 npm install 而非 npm ci：本仓库版本号手动 bump，lockfile 的 version 常与 package.json 不同步，
+      # npm ci 会因此失败；构建只需 devDeps，install 足够且稳健。
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Verify tag matches manifest version
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          MANIFEST="$(node -p "require('./manifest.json').version")"
+          if [ "$TAG" != "$MANIFEST" ]; then
+            echo "::error::Tag $TAG does not match manifest version $MANIFEST"
+            exit 1
+          fi
+
+      - name: Build
+        run: npm run build
+
+      # 给发布产物生成构建溯源签名：用户可用 `gh attestation verify` 验证产物确由本仓库源码构建。
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            main.js
+            manifest.json
+            styles.css
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            main.js manifest.json styles.css

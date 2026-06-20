@@ -21,7 +21,7 @@ export default class CobrainPlugin extends Plugin {
   image!: ImageClient;
   indexStore!: IndexStore;
   // 按路径防抖「modify → 嵌入」的定时器，避免编辑期间反复触发 modify 反复打嵌入接口
-  private modifyTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private modifyTimers = new Map<string, number>();
   // 设置页逐字符 onChange 走这个防抖版：停顿 400ms 才落盘，避免每键一次写。
   // 索引在 index/ 分片里（见 IndexStore），settings 本身已很小，这里再省掉高频小写入。
   saveSettingsDebounced = debounce(() => void this.saveSettings(), 400, true);
@@ -71,17 +71,14 @@ export default class CobrainPlugin extends Plugin {
         // 移动端为只读检索：不重建（避免蜂窝网重嵌 + 改写索引引发同步冲突），索引在桌面端建。
         if (Platform.isMobile) { new Notice("移动端为只读检索，索引请在桌面端重建"); return; }
         await this.indexReady; // 别在索引还没加载完时就重建（否则会把所有文件当"新文件"全量重嵌）
-        this.indexer.reindexAll(this.indexStore, this.settings.embedModel);
+        void this.indexer.reindexAll(this.indexStore, this.settings.embedModel);
       },
     });
 
     this.addCommand({
       id: "test-retrieval",
       name: "测试检索",
-      callback: () => new QueryModal(this.app, async (q) => {
-        const hits = await this.retriever.retrieve(q, 8);
-        new ResultsModal(this.app, q, hits).open();
-      }).open(),
+      callback: () => new QueryModal(this.app, (q) => void this.showRetrieval(q)).open(),
     });
 
     this.addCommand({
@@ -100,19 +97,19 @@ export default class CobrainPlugin extends Plugin {
         await this.indexReady; // 避免与后台加载竞争 store/分片
         // 文件在防抖窗口内被删：清掉待嵌入定时器，否则会把已删文件重新嵌回索引
         const t = this.modifyTimers.get(f.path);
-        if (t) { clearTimeout(t); this.modifyTimers.delete(f.path); }
+        if (t) { window.clearTimeout(t); this.modifyTimers.delete(f.path); }
         this.indexer.onDelete(f.path);
-        this.indexStore.removeFile(f.path);
+        await this.indexStore.removeFile(f.path);
       }));
       this.registerEvent(this.app.vault.on("rename", async (file, oldPath) => {
         // 改名/移动：内容没变，不重嵌——把索引条目改键到新路径，挪分片(删旧分片、写新分片)。
         if (!(file instanceof TFile) || file.extension !== "md") return;
         await this.indexReady; // 改键前确保索引已加载，否则改的是空 store
         const t = this.modifyTimers.get(oldPath);
-        if (t) { clearTimeout(t); this.modifyTimers.delete(oldPath); }
+        if (t) { window.clearTimeout(t); this.modifyTimers.delete(oldPath); }
         this.store.renameFile(oldPath, file.path);
-        this.indexStore.removeFile(oldPath);
-        this.indexStore.saveFile(file.path);
+        await this.indexStore.removeFile(oldPath);
+        await this.indexStore.saveFile(file.path);
       }));
     }
 
@@ -148,7 +145,7 @@ export default class CobrainPlugin extends Plugin {
     // 清掉所有挂起的防抖重嵌定时器：用的是裸 setTimeout（非 registerInterval），
     // 不主动清的话，插件卸载/更新后回调仍会 fire，对已卸载实例 saveData。
     this.disposed = true;
-    for (const t of this.modifyTimers.values()) clearTimeout(t);
+    for (const t of this.modifyTimers.values()) window.clearTimeout(t);
     this.modifyTimers.clear();
   }
 
@@ -166,10 +163,10 @@ export default class CobrainPlugin extends Plugin {
   // 防抖重嵌：编辑停顿约 2.5s 才嵌入变更文件。失败冒泡为 Notice，不再静默吞掉（旧代码无 catch）。
   private scheduleReindex(file: TFile): void {
     const prev = this.modifyTimers.get(file.path);
-    if (prev) clearTimeout(prev);
+    if (prev) window.clearTimeout(prev);
     this.modifyTimers.set(
       file.path,
-      setTimeout(() => {
+      window.setTimeout(() => {
         this.modifyTimers.delete(file.path);
         if (this.disposed) return; // 卸载后不再写盘
         // 先 await indexReady：避免索引还没加载完就 onModify，把条目写进半截 store
@@ -190,8 +187,18 @@ export default class CobrainPlugin extends Plugin {
       leaf = workspace.getRightLeaf(false)!;
       await leaf.setViewState({ type: VIEW_TYPE_COBRAIN_CHAT, active: true });
     }
-    workspace.revealLeaf(leaf);
+    await workspace.revealLeaf(leaf);
     return leaf.view instanceof ChatView ? leaf.view : null;
+  }
+
+  // 「测试检索」命令：跑检索并弹结果。抽成方法以便命令回调返回 void（避免把 async 直接塞进期望 void 的参数）。
+  private async showRetrieval(q: string): Promise<void> {
+    try {
+      const hits = await this.retriever.retrieve(q, 8);
+      new ResultsModal(this.app, q, hits).open();
+    } catch (e) {
+      new Notice("检索失败：" + (e instanceof Error ? e.message : String(e)));
+    }
   }
 
   // 选中文本 → 引用进 Cobrain：取选区 + 来源链接 + 最近标题 + 所在小节，预填进面板（不自动发）。
@@ -215,7 +222,7 @@ class QueryModal extends Modal {
   onOpen() {
     this.contentEl.createEl("h3", { text: "测试检索" });
     const input = this.contentEl.createEl("input", { type: "text" });
-    input.style.width = "100%";
+    input.setCssStyles({ width: "100%" });
     input.focus();
     input.addEventListener("keydown", (e) => {
       if (e.key === "Enter" && input.value.trim()) { this.close(); this.onSubmit(input.value.trim()); }
@@ -236,17 +243,15 @@ class ResultsModal extends Modal {
     }
     this.hits.forEach((h, i) => {
       const div = contentEl.createDiv();
-      div.style.margin = "0 0 12px";
+      div.setCssStyles({ margin: "0 0 12px" });
       const head = div.createEl("div", {
         text: `${i + 1}. ${h.score.toFixed(3)} · ${h.path}${h.heading ? " › " + h.heading : ""}`,
       });
-      head.style.fontWeight = "600";
+      head.setCssStyles({ fontWeight: "600" });
       const body = div.createEl("div", {
         text: h.text.slice(0, 220) + (h.text.length > 220 ? "…" : ""),
       });
-      body.style.opacity = "0.7";
-      body.style.fontSize = "0.85em";
-      body.style.marginTop = "2px";
+      body.setCssStyles({ opacity: "0.7", fontSize: "0.85em", marginTop: "2px" });
     });
   }
   onClose() { this.contentEl.empty(); }

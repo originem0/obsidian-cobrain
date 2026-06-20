@@ -99,8 +99,8 @@ export class ChatView extends ItemView {
 
   // 输入框随内容长高；上限与滚动由 CSS（.cobrain-input 的 max-height/overflow）封顶。
   private autoGrow(): void {
-    this.inputEl.style.height = "auto";
-    this.inputEl.style.height = this.inputEl.scrollHeight + "px";
+    this.inputEl.setCssStyles({ height: "auto" });
+    this.inputEl.setCssStyles({ height: this.inputEl.scrollHeight + "px" });
   }
 
   private makeBtn(parent: HTMLElement, text: string, fn: () => void): void {
@@ -354,7 +354,7 @@ class PromptModal extends Modal {
   onOpen(): void {
     this.contentEl.createEl("h3", { text: this.titleText });
     const input = this.contentEl.createEl("input", { type: "text", value: this.initial });
-    input.style.width = "100%";
+    input.setCssStyles({ width: "100%" });
     input.focus();
     input.select();
     const submit = () => {
@@ -365,7 +365,7 @@ class PromptModal extends Modal {
       if (e.key === "Enter") submit();
     });
     const btn = this.contentEl.createEl("button", { text: "确定" });
-    btn.style.marginTop = "8px";
+    btn.setCssStyles({ marginTop: "8px" });
     btn.onclick = submit;
   }
   onClose(): void {
@@ -387,10 +387,10 @@ class TextAreaModal extends Modal {
     this.contentEl.createEl("h3", { text: this.titleText });
     const ta = this.contentEl.createEl("textarea");
     ta.value = this.initial;
-    ta.style.cssText = "width:100%; height:160px; resize:vertical;";
+    ta.setCssStyles({ width: "100%", height: "160px", resize: "vertical" });
     ta.focus();
     const btn = this.contentEl.createEl("button", { text: "生成" });
-    btn.style.marginTop = "8px";
+    btn.setCssStyles({ marginTop: "8px" });
     btn.onclick = () => {
       this.onSubmit(ta.value.trim());
       this.close();
@@ -420,12 +420,12 @@ class SaveOptionsModal extends Modal {
 
     const mkCheck = (label: string, initial: boolean, onChange: (v: boolean) => void): void => {
       const row = this.contentEl.createDiv();
-      row.style.cssText = "display:flex; align-items:center; gap:8px; margin:8px 0;";
+      row.setCssStyles({ display: "flex", alignItems: "center", gap: "8px", margin: "8px 0" });
       const cb = row.createEl("input", { type: "checkbox" });
       cb.checked = initial;
       cb.onchange = () => onChange(cb.checked);
       const lab = row.createEl("label", { text: label });
-      lab.style.cursor = "pointer";
+      lab.setCssStyles({ cursor: "pointer" });
       lab.onclick = () => { cb.checked = !cb.checked; onChange(cb.checked); };
     };
 
@@ -433,13 +433,13 @@ class SaveOptionsModal extends Modal {
     if (this.defaults.hasImage) {
       // 本轮已点过「配图」：图会随笔记保存，不再重复询问
       const info = this.contentEl.createEl("p", { text: "✓ 已配图，将一并保存" });
-      info.style.cssText = "margin:8px 0; color:var(--text-muted); font-size:0.9em;";
+      info.setCssStyles({ margin: "8px 0", color: "var(--text-muted)", fontSize: "0.9em" });
     } else {
       mkCheck("为这篇配一张隐喻图（基于标题）", image, v => (image = v));
     }
 
     const row = this.contentEl.createDiv();
-    row.style.cssText = "display:flex; gap:8px; justify-content:flex-end; margin-top:12px;";
+    row.setCssStyles({ display: "flex", gap: "8px", justifyContent: "flex-end", marginTop: "12px" });
     const cancel = row.createEl("button", { text: "取消" });
     const save = row.createEl("button", { text: "保存" });
     save.classList.add("mod-cta");

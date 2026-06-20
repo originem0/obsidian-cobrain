@@ -95,7 +95,7 @@ export class CobrainSettingTab extends PluginSettingTab {
   display(): void {
     const { containerEl } = this;
     containerEl.empty();
-    containerEl.style.paddingBottom = "24px";
+    containerEl.setCssStyles({ paddingBottom: "24px" });
 
     this.renderEndpointSection(containerEl, {
       title: "文本 LLM（对话）",
@@ -137,8 +137,10 @@ export class CobrainSettingTab extends PluginSettingTab {
       const warn = body.createEl("p", {
         text: "隐私提示：建立索引会把你的笔记全文分块发送到这个嵌入端点。请使用你信任的端点；默认免费代理只适合试用。",
       });
-      warn.style.cssText =
-        "font-size:0.85em; margin:4px 0 10px; padding:6px 10px; line-height:1.5; border-left:3px solid var(--text-error); background:var(--background-secondary); border-radius:4px;";
+      warn.setCssStyles({
+        fontSize: "0.85em", margin: "4px 0 10px", padding: "6px 10px", lineHeight: "1.5",
+        borderLeft: "3px solid var(--text-error)", background: "var(--background-secondary)", borderRadius: "4px",
+      });
     }
 
     this.text(body, "Base URL", "OpenAI 兼容端点", opts.urlKey, "", opts.kind);
@@ -239,7 +241,7 @@ export class CobrainSettingTab extends PluginSettingTab {
 
     if (opts.kind === "image") {
       const note = body.createEl("p", { text: "图像模型不自动测试。出图耗时长且可能计费，请用「配图」功能实测。" });
-      note.style.cssText = "font-size:0.85em; color:var(--text-muted); margin:6px 0 14px;";
+      note.setCssStyles({ fontSize: "0.85em", color: "var(--text-muted)", margin: "6px 0 14px" });
       this.text(body, "尺寸", "如 1024x1024", "imageSize");
       this.text(body, "质量", "如 high/medium/low 或 hd；留空则不发送（部分代理不支持此参数）", "imageQuality");
       this.textArea(body, "风格预设", "拼到每张配图提示词尾部，统一画风", "imageStyle");
@@ -328,7 +330,7 @@ export class CobrainSettingTab extends PluginSettingTab {
         this.plugin.saveSettingsDebounced();
       });
       t.inputEl.rows = 6;
-      t.inputEl.style.width = "100%";
+      t.inputEl.setCssStyles({ width: "100%" });
     });
   }
 
@@ -339,32 +341,36 @@ export class CobrainSettingTab extends PluginSettingTab {
   ): { body: HTMLElement; status: HTMLElement } {
     const details = container.createEl("details");
     details.open = open;
-    details.style.cssText =
-      "margin:0 0 10px; padding:0; border:1px solid var(--background-modifier-border); border-radius:6px; background:var(--background-primary);";
+    details.setCssStyles({
+      margin: "0 0 10px", padding: "0", border: "1px solid var(--background-modifier-border)",
+      borderRadius: "6px", background: "var(--background-primary)",
+    });
     const summary = details.createEl("summary");
-    summary.style.cssText =
-      "display:flex; align-items:center; justify-content:space-between; gap:12px; cursor:pointer; padding:10px 12px; font-weight:600;";
+    summary.setCssStyles({
+      display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px",
+      cursor: "pointer", padding: "10px 12px", fontWeight: "600",
+    });
     summary.createSpan({ text: title });
     const status = summary.createSpan();
-    status.style.cssText = "font-size:0.82em; font-weight:500; color:var(--text-muted); white-space:nowrap;";
+    status.setCssStyles({ fontSize: "0.82em", fontWeight: "500", color: "var(--text-muted)", whiteSpace: "nowrap" });
     const body = details.createDiv();
-    body.style.cssText = "padding:0 12px 12px;";
+    body.setCssStyles({ padding: "0 12px 12px" });
     return { body, status };
   }
 
   private paintStatus(el: HTMLElement, status: EndpointStatus): void {
     if (status.state === "ok") {
       el.setText(`● ${status.text ?? "已连通"}`);
-      el.style.color = "var(--text-success)";
+      el.setCssStyles({ color: "var(--text-success)" });
       return;
     }
     if (status.state === "fail") {
       el.setText(`✗ ${status.text ?? "失败"}`);
-      el.style.color = "var(--text-error)";
+      el.setCssStyles({ color: "var(--text-error)" });
       return;
     }
     el.setText(`○ ${status.text ?? "未测"}`);
-    el.style.color = "var(--text-muted)";
+    el.setCssStyles({ color: "var(--text-muted)" });
   }
 
   private refreshModelDropdown(kind: EndpointKind): void {

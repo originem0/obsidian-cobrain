@@ -15,7 +15,7 @@ function normalize(v: number[]): number[] {
 }
 
 function sleep(ms: number): Promise<void> {
-  return new Promise(r => setTimeout(r, ms));
+  return new Promise(r => window.setTimeout(r, ms));
 }
 
 // OpenAI 兼容的云端 embeddings。用 Obsidian requestUrl（免 CORS）异步调用，不占用主线程。
