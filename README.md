@@ -1,5 +1,15 @@
 # Cobrain（创作副脑）
 
+**Cobrain** is an Obsidian plugin that turns the notes you've already written into "prior knowledge" for an AI thinking partner — a Socratic *midwife*, not a lecturer. Instead of handing you answers, it surfaces your own related notes and throws questions back at you, so you think things through yourself.
+
+- **Asks before it explains** — based on what your notes show you already know, it uses differential questioning and dialectical reversal to put the ball back in your court.
+- **Resurfaces your forgotten notes** — every turn it retrieves your vault and explicitly lists "notes you've written (click to revisit)", so your second brain's associations actually happen instead of being silently stuffed into the model's context.
+- **Explicit, on-demand actions** — generate a Mermaid concept map, an illustrative image, or distill the conversation into a structured note with backlinks to the related notes.
+
+Bring your own OpenAI-compatible endpoints (chat / image / embeddings); API keys are stored locally only. The desktop app is the sole index writer; mobile is read-only retrieval over the synced index. Method and philosophy are inspired by Tang Zhi's *《高手的黑箱》* ("The Expert's Black Box"). The full guide below is in Chinese.
+
+---
+
 > 懂你 vault 的 Obsidian 创作副脑——不是讲给你听的「导师」，而是逼你自己想的「助产士」。
 
 一个独立的 Obsidian 插件（TypeScript，桌面 + 移动端）。它把你写过的笔记当作喂给 AI 的「前知识」，对话时：
