@@ -19,3 +19,30 @@
 .cobrain-related-item { margin: 4px 0; cursor: pointer; }
 .cobrain-related-title { font-size: 0.85em; color: var(--text-accent); }
 .cobrain-related-snippet { font-size: 0.78em; color: var(--text-faint); }
+.cobrain-bubble-actions { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+.cobrain-action-btn { font-size: 0.75em; padding: 2px 8px; opacity: 0.8; cursor: pointer; }
+.cobrain-action-btn:hover { opacity: 1; }
+/* Mermaid 图表可点击切换 */
+.cobrain-mermaid-toggle { cursor: pointer; }
+.cobrain-mermaid-toggle:hover { opacity: 0.9; }
+.cobrain-mermaid-code {
+  background: var(--background-primary);
+  padding: 12px;
+  border-radius: 4px;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  font-family: var(--font-monospace);
+  font-size: 0.85em;
+  line-height: 1.5;
+}
+/* 图片缩略图 */
+.cobrain-image-thumb {
+  max-width: 300px;
+  max-height: 200px;
+  cursor: pointer;
+  border-radius: 4px;
+  transition: opacity 0.2s;
+}
+.cobrain-image-thumb:hover {
+  opacity: 0.85;
+}

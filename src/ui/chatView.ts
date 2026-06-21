@@ -1,4 +1,4 @@
-import { ItemView, WorkspaceLeaf, MarkdownRenderer, Notice, Modal, App } from "obsidian";
+import { ItemView, WorkspaceLeaf, MarkdownRenderer, Notice, Modal, App, TFile, Menu } from "obsidian";
 import type { ChatMsg } from "../llm/chatClient";
 import type { QueryHit } from "../rag/vectorStore";
 import { saveNote, saveImage } from "../noteWriter";
@@ -112,8 +112,117 @@ export class ChatView extends ItemView {
     const b = this.messagesEl.createDiv({ cls: `cobrain-bubble cobrain-bubble-${role === "user" ? "user" : "ai"}` });
     b.createDiv({ cls: "cobrain-who", text: role === "user" ? "你" : "副脑" });
     const body = b.createDiv();
-    if (role === "assistant") void MarkdownRenderer.render(this.app, text, body, "", this);
-    else body.setText(text);
+
+    if (role === "assistant") {
+      void MarkdownRenderer.render(this.app, text, body, "", this);
+
+      // 检测 Mermaid 代码块 → 点击图表切换显示代码
+      const mermaidMatch = text.match(/```mermaid\n([\s\S]*?)```/);
+      if (mermaidMatch) {
+        const code = mermaidMatch[1].trim();
+        // 等待渲染完成后添加点击切换逻辑
+        window.setTimeout(() => {
+          // 找到渲染容器：尝试多种可能的选择器
+          const container = body.querySelector("pre.language-mermaid") || body.querySelector(".block-language-mermaid") || body.querySelector("[class*='mermaid']");
+          if (!container || !(container instanceof HTMLElement)) return;
+
+          let showingCode = false;
+          const rendered = container.cloneNode(true) as HTMLElement; // 保存渲染视图
+
+          container.addClass("cobrain-mermaid-toggle");
+          container.setAttribute("title", "点击查看代码");
+          container.onclick = (e: MouseEvent) => {
+            e.stopPropagation();
+            if (showingCode) {
+              // 切回图表
+              container.empty();
+              container.appendChild(rendered.cloneNode(true));
+              container.setAttribute("title", "点击查看代码");
+              showingCode = false;
+            } else {
+              // 切换成代码
+              container.empty();
+              const pre = container.createEl("pre", { cls: "cobrain-mermaid-code" });
+              pre.createEl("code", { text: code });
+              container.setAttribute("title", "点击返回图表");
+              showingCode = true;
+            }
+          };
+        }, 150);
+      }
+
+      // 检测图片嵌入 ![[...]] → 缩略图 + 单击查看大图 + 右键菜单
+      const imageMatch = text.match(/!\[\[([^\]]+)\]\]/);
+      if (imageMatch) {
+        const imagePath = imageMatch[1];
+        window.setTimeout(() => {
+          // 找到渲染出的图片元素
+          const imgEl = body.querySelector("img[src*='" + imagePath.split('/').pop()?.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + "']");
+          if (!imgEl || !(imgEl instanceof HTMLImageElement)) return;
+
+          // 缩略图样式
+          imgEl.addClass("cobrain-image-thumb");
+          imgEl.setAttribute("title", "单击查看大图");
+
+          // 单击查看大图
+          imgEl.onclick = (e: MouseEvent) => {
+            e.stopPropagation();
+            const file = this.app.vault.getAbstractFileByPath(imagePath);
+            if (file instanceof TFile) {
+              // 使用 Obsidian 内置的图片查看器
+              this.app.workspace.getLeaf(false).openFile(file);
+            }
+          };
+
+          // 右键菜单
+          imgEl.addEventListener("contextmenu", (e: MouseEvent) => {
+            e.preventDefault();
+            e.stopPropagation();
+            const menu = new Menu();
+
+            menu.addItem(item => {
+              item.setTitle("单独保存配图")
+                .setIcon("download")
+                .onClick(async () => {
+                  const file = this.app.vault.getAbstractFileByPath(imagePath);
+                  if (file instanceof TFile) {
+                    try {
+                      const content = await this.app.vault.readBinary(file);
+                      const newPath = await saveImage(this.app, this.plugin.settings, content);
+                      new Notice(`配图已另存为：${newPath}`);
+                    } catch (err) {
+                      new Notice("保存失败：" + (err instanceof Error ? err.message : String(err)));
+                    }
+                  }
+                });
+            });
+
+            menu.addItem(item => {
+              item.setTitle("删除配图")
+                .setIcon("trash")
+                .onClick(async () => {
+                  const file = this.app.vault.getAbstractFileByPath(imagePath);
+                  if (file instanceof TFile) {
+                    try {
+                      await this.app.vault.delete(file);
+                      new Notice("配图已删除");
+                      // 移除图片元素
+                      imgEl.remove();
+                    } catch (err) {
+                      new Notice("删除失败：" + (err instanceof Error ? err.message : String(err)));
+                    }
+                  }
+                });
+            });
+
+            menu.showAtMouseEvent(e);
+          });
+        }, 150);
+      }
+    } else {
+      body.setText(text);
+    }
+
     if (sources?.length) {
       b.createDiv({ cls: "cobrain-srcline", text: "来源：" + sources.map(p => p.split("/").pop()).join("、") });
     }
@@ -302,10 +411,10 @@ export class ChatView extends ItemView {
     notice.hide();
     this.release(); // 下面要弹选项框、可能还要长时出图，期间不锁面板
 
-    // 保存选项：附提问（默认随全局设置）+ 配图（默认关；本轮已配过图则只提示、不再问）。取消则中止。
+    // 保存选项：附提问（默认随全局设置）+ 配图（默认关，即使本轮已配过图也要问）。取消则中止。
     const opts = await askSaveOptions(this.app, title, {
       append: this.plugin.settings.appendConversation,
-      hasImage: !!this.lastImageEmbed,
+      hasImage: false, // 始终显示配图复选框，不自动带入
     });
     if (!opts) return; // 取消，不落盘
     if (opts.image && !this.lastImageEmbed) await this.runImageFromConcept(title); // 自行管理 acquire/release
@@ -322,7 +431,7 @@ export class ChatView extends ItemView {
         body,
         sources: [...this.sources],
         mermaid: this.lastMermaid,
-        imageEmbed: this.lastImageEmbed,
+        imageEmbed: opts.image ? this.lastImageEmbed : null, // 只有勾选才加配图
         conversation,
       });
       new Notice("已保存：" + path);
@@ -401,7 +510,7 @@ class TextAreaModal extends Modal {
   }
 }
 
-// 存为笔记的选项框：附提问原文（默认随全局设置） + 配图（默认关；本轮已配过图则改为提示、不再问）。
+// 存为笔记的选项框：附提问原文（默认随全局设置） + 配图（默认关）。
 // 按钮先回调再 close，避免与 onClose 的兜底重复 resolve。
 class SaveOptionsModal extends Modal {
   constructor(
@@ -430,13 +539,7 @@ class SaveOptionsModal extends Modal {
     };
 
     mkCheck("附上我的提问原文", append, v => (append = v));
-    if (this.defaults.hasImage) {
-      // 本轮已点过「配图」：图会随笔记保存，不再重复询问
-      const info = this.contentEl.createEl("p", { text: "✓ 已配图，将一并保存" });
-      info.setCssStyles({ margin: "8px 0", color: "var(--text-muted)", fontSize: "0.9em" });
-    } else {
-      mkCheck("为这篇配一张隐喻图（基于标题）", image, v => (image = v));
-    }
+    mkCheck("为这篇配一张隐喻图（基于标题）", image, v => (image = v));
 
     const row = this.contentEl.createDiv();
     row.setCssStyles({ display: "flex", gap: "8px", justifyContent: "flex-end", marginTop: "12px" });
