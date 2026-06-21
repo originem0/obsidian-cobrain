@@ -18,6 +18,41 @@ function sleep(ms: number): Promise<void> {
   return new Promise(r => window.setTimeout(r, ms));
 }
 
+export function parseEmbeddingResponse(json: unknown, expectedCount: number): number[][] {
+  if (!json || typeof json !== "object" || !("data" in json) || !Array.isArray(json.data)) {
+    throw new Error("嵌入 API 返回格式异常：缺少 data 数组");
+  }
+  if (json.data.length !== expectedCount) {
+    throw new Error(`嵌入 API 返回数量不匹配：请求 ${expectedCount}，返回 ${json.data.length}`);
+  }
+  const seen = new Set<number>();
+  const data: Array<{ embedding: number[]; index: number }> = [];
+  for (const item of json.data) {
+    if (!item || typeof item !== "object" || !("embedding" in item) || !Array.isArray(item.embedding) || !("index" in item) || typeof item.index !== "number") {
+      throw new Error("嵌入 API 返回格式异常：data 项缺少 embedding/index");
+    }
+    const index = item.index;
+    if (!Number.isInteger(index) || index < 0 || index >= expectedCount || seen.has(index)) {
+      throw new Error("嵌入 API 返回 index 不连续或重复");
+    }
+    seen.add(index);
+    const embedding = item.embedding as unknown[];
+    if (!embedding.length || embedding.some(v => typeof v !== "number" || !Number.isFinite(v))) {
+      throw new Error("嵌入 API 返回向量包含非有限数值");
+    }
+    data.push({ embedding: embedding as number[], index });
+  }
+  for (let i = 0; i < expectedCount; i++) {
+    if (!seen.has(i)) throw new Error("嵌入 API 返回 index 不连续或重复");
+  }
+  data.sort((a, b) => a.index - b.index);
+  const dim = data[0]?.embedding.length ?? 0;
+  if (!dim || data.some(d => d.embedding.length !== dim)) {
+    throw new Error("嵌入 API 返回向量维度不一致");
+  }
+  return data.map(d => normalize(d.embedding));
+}
+
 // OpenAI 兼容的云端 embeddings。用 Obsidian requestUrl（免 CORS）异步调用，不占用主线程。
 // 持有 settings 引用，调用时读最新 baseUrl/key/model（改设置即时生效）。
 export class ApiEmbedder implements Embedder {
@@ -39,19 +74,7 @@ export class ApiEmbedder implements Embedder {
         "嵌入 API",
       );
       if (res.status === 200) {
-        const json: unknown = res.json;
-        if (!json || typeof json !== "object" || !("data" in json) || !Array.isArray(json.data)) {
-          throw new Error("嵌入 API 返回格式异常：缺少 data 数组");
-        }
-        const data: Array<{ embedding: number[]; index: number }> = [];
-        for (const item of json.data) {
-          if (item && typeof item === "object" && "embedding" in item && Array.isArray(item.embedding) && "index" in item && typeof item.index === "number") {
-            data.push({ embedding: item.embedding as number[], index: item.index });
-          }
-        }
-        data.sort((a, b) => a.index - b.index);
-        const vecs = data.map(d => normalize(d.embedding));
-        return vecs;
+        return parseEmbeddingResponse(res.json, inputs.length);
       }
       // 429（限流）/ 5xx（服务端抖动）退避重试；其它 4xx 是请求本身的问题，重试无意义，直接抛
       const retryable = res.status === 429 || res.status >= 500;

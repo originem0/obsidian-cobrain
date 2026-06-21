@@ -1,12 +1,12 @@
-# Cobrain 跨设备私用（桌面 + 移动端）
+# Cobrain 跨设备使用（桌面 + 移动端）
 
-> 设计文档 · 2026-06-19 · 工作流 #3（移动端启用 · 私用，不上架）
+> 设计文档 · 2026-06-19 · 工作流 #3（移动端启用）。状态更新：已提交 Obsidian 官方社区插件上架申请，审核中。
 
 ## Context
 
 `manifest.json` 现为 `isDesktopOnly: true`——这是早年用 transformers.js 本地嵌入的遗留；云端 API 化之后代码已无任何 Node/Electron 依赖、也无 iOS 不支持的 lookbehind 正则（grep 已核实），`requestUrl`/`adapter`/`Modal`/`ItemView` 全是跨平台 API。#1 把索引从 160 MB 砍到约 10 MB 后，移动端解析/内存也不再是坎。
 
-用户诉求是**在自己的桌面 + 平板/手机上都能用、换设备能装上**，而非对公众发布。经核实，"换设备能装"用 BRAT 或 vault 文件同步即可，**不必上架官方市场**；上架另需 LICENSE / versions.json / 删日志 / styles.css 迁移 / **改掉指向免费代理的默认端点** / 过审，属独立的后续工作流，本次不做。
+用户诉求是**在自己的桌面 + 平板/手机上都能用、换设备能装上**。早期判断是 BRAT 或 vault 文件同步已够用；现在已提交 Obsidian 官方社区插件申请，安装路径改为“审核通过后优先社区插件，审核前继续手动 / BRAT / vault 同步”。
 
 用户的多设备同步方式是 **iCloud/Dropbox/OneDrive 等文件级同步整个 vault 文件夹**，默认会把 `.obsidian/plugins/cobrain/`（插件代码 + 10 MB `index.json`）一起带到移动端。这是本设计的关键前提。
 
@@ -20,7 +20,7 @@
 - 文档化跨设备工作流与注意事项。
 
 **非目标（YAGNI / 留作后续）**
-- 上架官方市场及其全部合规项（LICENSE、versions.json、删 `console.log`、内联样式迁 `styles.css`、改默认端点、GitHub Release、提交 PR）。
+- 社区插件审核之外的发布自动化（例如自动生成 Release、自动提交版本更新 PR）。
 - 移动端 UI 重排版（聊天面板内联样式在小屏上的适配）。
 - 把 BRAT/Release 发布做成代码或脚本（属操作步骤，仅写进 README）。
 - 多个桌面端并发写索引的冲突处理（假定单一桌面端为写入方）。
@@ -49,7 +49,7 @@
 
 ### ④ 换设备安装与同步（文档，非代码）
 写进 README 的"跨设备使用"小节：
-- 你的文件同步本就把 `.obsidian/plugins/cobrain/` 带到新设备，**插件代码与索引自动就位，无需上架、无需 BRAT**。
+- 官方社区插件审核通过后，每台设备直接从社区插件安装；审核通过前，文件同步仍可把 `.obsidian/plugins/cobrain/` 带到新设备。
 - 移动端 Obsidian 需**重启/强退**才会加载新同步来的 `main.js`。
 - 索引**只在桌面端重建**；移动端只读检索，移动端新建的笔记待下次桌面端重建后才可被检索到。
 - 兜底：若 iCloud/Dropbox 同步 `.obsidian` 的大量小文件偶发冲突，可改用 **BRAT**（从 GitHub 仓库 `originem0/obsidian-cobrain` 安装代码，移动端亦支持、可自动更新），索引仍走 vault 同步。

@@ -18,3 +18,30 @@ export function parseNote(
 export function sanitizeFilename(name: string, maxLen = 60): string {
   return name.replace(/[\\/:*?"<>|#^[\]]/g, "").trim().slice(0, maxLen) || "cobrain-note";
 }
+
+export function formatWikiLink(path: string, heading?: string): string {
+  const cleanPath = path.replace(/\.md$/i, "");
+  const aliasBase = cleanPath.split("/").pop() || cleanPath;
+  const safeHeading = heading?.replace(/\|/g, " ").trim();
+  const target = safeHeading ? `${cleanPath}#${safeHeading}` : cleanPath;
+  const alias = safeHeading ? `${aliasBase} › ${safeHeading}` : aliasBase;
+  return `[[${target}|${alias}]]`;
+}
+
+// 旧提示词会让模型自己生成 `## 相关`，而 saveNote 会用真实 sources 再追加一次。
+// 只剥掉末尾的相关区，避免误删正文中间讨论「相关」概念的段落。
+export function stripTrailingRelatedSection(markdown: string): string {
+  const lines = markdown.trimEnd().split(/\r?\n/);
+  let lastH2 = -1;
+  let relatedH2 = -1;
+  lines.forEach((line, i) => {
+    if (/^##\s+.+\s*$/.test(line.trim())) {
+      lastH2 = i;
+      if (/^##\s+相关\s*$/.test(line.trim())) relatedH2 = i;
+    }
+  });
+  if (relatedH2 >= 0 && relatedH2 === lastH2) {
+    return lines.slice(0, relatedH2).join("\n").trimEnd();
+  }
+  return markdown.trimEnd();
+}

@@ -6,7 +6,7 @@
 
 读文档（中文或英文皆可）时常对某句/某段有疑问，想拿去问副脑。现状只能手动复制粘贴，还丢了来源。需求：**选中文本 → 一键引用进 Cobrain，自动带上来源路径与原文，免复制粘贴**。
 
-经核实，Obsidian 在**有 editor 的模式**（实时预览 Live Preview / 源码）下提供完整能力：`editor-menu` 事件（`obsidian.d.ts:8128`）、`editorCallback`（:1794）、`editor.getSelection()`（:2450）、`MetadataCache.fileToLinktext`（:4431）。功能与语言无关——`getSelection()` 抓什么是什么，英文/中文/代码一视同仁；默认嵌入模型 `BAAI/bge-m3` 多语言、跨语言，英文引文也能撞出 vault 里相关（含中文）笔记。
+经核实，Obsidian 在**有 editor 的模式**（实时预览 Live Preview / 源码）下提供完整能力：`editor-menu` 事件（`obsidian.d.ts:8128`）、`editorCallback`（:1794）、`editor.getSelection()`（:2450）、`MetadataCache.fileToLinktext`（:4431）。功能与语言无关——`getSelection()` 抓什么是什么，英文/中文/代码一视同仁；只要用户配置的嵌入模型支持多语言、跨语言，英文引文也能撞出 vault 里相关（含中文）笔记。
 
 ## 目标 / 非目标
 

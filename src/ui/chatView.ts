@@ -1,4 +1,4 @@
-import { ItemView, WorkspaceLeaf, MarkdownRenderer, Notice, Modal, App, TFile, Menu } from "obsidian";
+import { ItemView, WorkspaceLeaf, MarkdownRenderer, Notice, Modal, App, TFile, Menu, normalizePath } from "obsidian";
 import type { ChatMsg } from "../llm/chatClient";
 import type { QueryHit } from "../rag/vectorStore";
 import { saveNote, saveImage } from "../noteWriter";
@@ -45,6 +45,23 @@ function askSaveOptions(
   });
 }
 
+function askConfirm(app: App, title: string, message: string): Promise<boolean> {
+  return new Promise(resolve => {
+    let done = false;
+    const finish = (v: boolean) => { if (!done) { done = true; resolve(v); } };
+    const m = new ConfirmModal(app, title, message, finish);
+    const close = m.onClose.bind(m);
+    m.onClose = () => { close(); finish(false); };
+    m.open();
+  });
+}
+
+function isUnderFolder(path: string, folder: string): boolean {
+  const p = normalizePath(path);
+  const f = normalizePath(folder).replace(/\/+$/, "");
+  return !!f && p.startsWith(f + "/");
+}
+
 export class ChatView extends ItemView {
   private history: ChatMsg[] = [];
   private sources = new Set<string>();
@@ -54,7 +71,7 @@ export class ChatView extends ItemView {
   private inputEl!: HTMLTextAreaElement;
   private sendBtn!: HTMLButtonElement;
   private busy = false; // 一次只跑一轮 ask，避免连发导致 history 交错
-  private pendingSourceContext: string | null = null; // 引用带来的源笔记小节，只喂给紧接着的那一问
+  private pendingSourceContexts: string[] = []; // 引用带来的源笔记小节，只喂给紧接着的那一问
   private instanceId: number; // 实例 ID（1/2/3）
 
   constructor(leaf: WorkspaceLeaf, private plugin: CobrainPlugin, instanceId: number = 1) {
@@ -74,11 +91,12 @@ export class ChatView extends ItemView {
     this.messagesEl = root.createDiv({ cls: "cobrain-messages" });
     this.messagesEl.createDiv({
       cls: "cobrain-welcome",
-      text: "聊你正在想的——我会翻出你写过的相关旧笔记摊到眼前，并回抛问题逼你自己想。下方：概念图 / 配图 / 存为笔记。",
+      text: "聊你正在想的——我会翻出你写过的相关旧笔记摊到眼前，并回抛问题逼你自己想。下方：概念图 / 推敲 / 配图 / 存为笔记。",
     });
 
     const bar = root.createDiv({ cls: "cobrain-bar" });
     this.makeBtn(bar, "概念图", () => void this.doConceptMap());
+    this.makeBtn(bar, "推敲", () => void this.doCritique());
     this.makeBtn(bar, "配图", () => void this.doImage());
     this.makeBtn(bar, "存为笔记", () => void this.doSaveNote());
 
@@ -205,6 +223,13 @@ export class ChatView extends ItemView {
                 .onClick(async () => {
                   const file = this.app.vault.getAbstractFileByPath(imagePath);
                   if (file instanceof TFile) {
+                    const folder = this.plugin.settings.attachmentFolder || "cobrain-note/附件";
+                    if (!isUnderFolder(file.path, folder)) {
+                      new Notice("只能删除附件目录内的 Cobrain 配图");
+                      return;
+                    }
+                    const confirmed = await askConfirm(this.app, "删除配图", `确定删除 ${file.path}？`);
+                    if (!confirmed) return;
                     try {
                       await this.app.vault.delete(file);
                       new Notice("配图已删除");
@@ -232,7 +257,7 @@ export class ChatView extends ItemView {
     return b;
   }
 
-  // 把检索命中的旧笔记显式列出来、可点开——让 vault 主动「撞」你（第二大脑「联想」）
+  // 把检索命中的旧笔记显式列出来、可点开，让第二大脑的联想发生在用户眼前。
   private addRelatedBlock(hits: QueryHit[]): void {
     if (!hits.length) return;
     const seen = new Set<string>();
@@ -242,7 +267,7 @@ export class ChatView extends ItemView {
       return true;
     });
     const wrap = this.messagesEl.createDiv({ cls: "cobrain-related" });
-    wrap.createDiv({ cls: "cobrain-related-head", text: "你写过的（点开撞一撞）" });
+    wrap.createDiv({ cls: "cobrain-related-head", text: "相关旧笔记" });
     uniq.slice(0, 8).forEach(h => {
       const item = wrap.createDiv({ cls: "cobrain-related-item" });
       const title = (h.path.split("/").pop() ?? h.path).replace(/\.md$/, "") + (h.heading ? " › " + h.heading : "");
@@ -276,7 +301,7 @@ export class ChatView extends ItemView {
 
   // 把"引用"(来源链接 + 原文)预填进输入框；来源上下文暂存，喂给紧接着的那一问。
   quoteIntoInput(text: string, sourceContext?: string): void {
-    this.pendingSourceContext = sourceContext ?? null;
+    if (sourceContext) this.pendingSourceContexts.push(sourceContext);
     this.inputEl.value = text + this.inputEl.value;
     this.inputEl.focus();
     this.inputEl.setSelectionRange(text.length, text.length);
@@ -288,21 +313,22 @@ export class ChatView extends ItemView {
     const text = this.inputEl.value.trim();
     if (!text) return;
     if (!this.acquire()) return;
-    const sourceContext = this.pendingSourceContext; // 消费一次：仅这一问带来源上下文
-    this.pendingSourceContext = null;
+    const sourceContext = this.pendingSourceContexts.length
+      ? this.pendingSourceContexts.join("\n\n---\n\n")
+      : undefined; // 消费一次：仅这一问带来源上下文
+    this.pendingSourceContexts = [];
     this.inputEl.value = "";
     this.autoGrow();
     this.addBubble("user", text);
     const thinking = this.addBubble("assistant", "思考中…");
     try {
-      const { reply, sources, related } = await this.plugin.tutor.ask(this.history, text, sourceContext ?? undefined);
+      const { reply, sources, related } = await this.plugin.tutor.ask(this.history.slice(-20), text, sourceContext);
       thinking.remove();
       // 先把你自己写过的相关旧笔记摊到眼前（第二大脑「联想」），再看导师的回应
       this.addRelatedBlock(related);
       this.addBubble("assistant", reply);
       sources.forEach(s => this.sources.add(s));
       this.history.push({ role: "user", content: text }, { role: "assistant", content: reply });
-      if (this.history.length > 20) this.history = this.history.slice(-20);
     } catch (e) {
       thinking.remove();
       this.addBubble("assistant", "出错了：" + errMsg(e));
@@ -329,6 +355,26 @@ export class ChatView extends ItemView {
       this.lastMermaid = null; // 失败不保留上一个话题的旧图，避免存笔记时把陈旧图串进去
       bubble.remove();
       this.addBubble("assistant", "概念图失败：" + errMsg(e));
+    } finally {
+      this.release();
+    }
+  }
+
+  private async doCritique(): Promise<void> {
+    if (!this.history.length) {
+      new Notice("还没有对话可推敲");
+      return;
+    }
+    if (!this.acquire()) return;
+    const bubble = this.addBubble("assistant", "推敲中…");
+    try {
+      const reply = await this.plugin.tutor.critique(this.history);
+      bubble.remove();
+      this.addBubble("assistant", reply);
+      this.history.push({ role: "assistant", content: reply });
+    } catch (e) {
+      bubble.remove();
+      this.addBubble("assistant", "推敲失败：" + errMsg(e));
     } finally {
       this.release();
     }
@@ -508,6 +554,31 @@ class TextAreaModal extends Modal {
       this.onSubmit(ta.value.trim());
       this.close();
     };
+  }
+  onClose(): void {
+    this.contentEl.empty();
+  }
+}
+
+class ConfirmModal extends Modal {
+  constructor(
+    app: App,
+    private titleText: string,
+    private message: string,
+    private onPick: (v: boolean) => void,
+  ) {
+    super(app);
+  }
+  onOpen(): void {
+    this.contentEl.createEl("h3", { text: this.titleText });
+    this.contentEl.createEl("p", { text: this.message });
+    const row = this.contentEl.createDiv();
+    row.setCssStyles({ display: "flex", gap: "8px", justifyContent: "flex-end", marginTop: "12px" });
+    const cancel = row.createEl("button", { text: "取消" });
+    const ok = row.createEl("button", { text: "删除" });
+    ok.classList.add("mod-warning");
+    cancel.onclick = () => { this.onPick(false); this.close(); };
+    ok.onclick = () => { this.onPick(true); this.close(); };
   }
   onClose(): void {
     this.contentEl.empty();

@@ -1,5 +1,5 @@
 import { App, normalizePath } from "obsidian";
-import { sanitizeFilename } from "./util/noteFormat";
+import { formatWikiLink, sanitizeFilename, stripTrailingRelatedSection } from "./util/noteFormat";
 import type { CobrainSettings } from "./settings";
 
 export interface NotePayload {
@@ -12,8 +12,12 @@ export interface NotePayload {
 }
 
 async function ensureFolder(app: App, folder: string): Promise<void> {
-  if (!app.vault.getAbstractFileByPath(folder)) {
-    await app.vault.createFolder(folder).catch(() => {});
+  const normalized = normalizePath(folder);
+  const parts = normalized.split("/").filter(Boolean);
+  let cur = "";
+  for (const part of parts) {
+    cur = cur ? `${cur}/${part}` : part;
+    if (!app.vault.getAbstractFileByPath(cur)) await app.vault.createFolder(cur);
   }
 }
 
@@ -25,15 +29,16 @@ export async function saveNote(app: App, settings: CobrainSettings, p: NotePaylo
   const date = new Date().toISOString().slice(0, 10);
   // 标签来自设置（中/英文逗号分隔）；空则不写 tags
   const tags = (settings.noteTags || "").split(/[，,]/).map(t => t.trim()).filter(Boolean);
+  const body = stripTrailingRelatedSection(p.body);
   const parts: string[] = ["---", `date: ${date}`];
   if (tags.length) parts.push(`tags: [${tags.join(", ")}]`);
   parts.push("status: seedling");
-  parts.push("---", "", `# ${p.title}`, "", p.body, "");
+  parts.push("---", "", `# ${p.title}`, "", body, "");
   if (p.mermaid) parts.push(p.mermaid, "");
   if (p.imageEmbed) parts.push(p.imageEmbed, "");
   if (p.sources?.length) {
     parts.push("## 相关", "");
-    for (const s of p.sources) parts.push(`- [[${s.replace(/\.md$/, "")}]]`);
+    for (const s of p.sources) parts.push(`- ${formatWikiLink(s)}`);
   }
   if (p.conversation) {
     parts.push("", "## 原始问题", "", p.conversation);

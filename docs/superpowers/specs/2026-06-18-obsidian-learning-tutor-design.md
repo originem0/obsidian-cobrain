@@ -31,12 +31,12 @@
 4. **知识库（RAG 闭环）**：
    - 输入：检索 vault 已有笔记作上下文，按用户已知水平讲、避免重复、连接新旧。
    - 输出：结构化笔记写回 vault，双链到相关旧笔记。
-   - 实现：**自建向量库**——**云端嵌入 API（OpenAI 兼容 `/embeddings`，可插拔 Embedder 接口，默认 `BAAI/bge-m3`）**嵌入笔记，向量存插件数据，不耦合 SC 内部格式。（实现期变更：最初设计为本地 transformers.js，后改用云端 embeddings API——更快、中文检索质量更好；**代价是笔记全文会发往嵌入代理，见下方「隐私边界」**。）
+   - 实现：**自建向量库**——**云端嵌入 API（OpenAI 兼容 `/embeddings`，可插拔 Embedder 接口）**嵌入笔记，向量存插件数据，不耦合 SC 内部格式。（实现期变更：最初设计为本地 transformers.js，后改用云端 embeddings API——更快、中文检索质量更好；**代价是笔记全文会发往嵌入代理，见下方「隐私边界」**。）
 5. **生成时机**：**显式触发**（用户下命令才生成笔记/图），控制成本与质量。
 6. **视觉层（分工）**：
    - **Mermaid 概念图（主）**：焦点问题→概念→关系，与用户共建，服务「自己画概念图」这一学习目标。
    - **gpt-image-2 插画（辅）**：仅对可具象的概念，生成视觉隐喻。
-7. **可用 API（已确认实测）**：文本 LLM = `z-ai/glm-5.1`（`https://wududu.edu.kg/v1`，OpenAI 兼容，chat 实测 200）；图像 = `gpt-image-2`（`https://freeapi.dgbmc.top/v1`，OpenAI 兼容 HTTP）；**embeddings = 云端 OpenAI 兼容 API（默认 `BAAI/bge-m3`，端点/模型可配）**。密钥仅存插件设置，绝不入库。
+7. **API 配置**：三类 API 均为 OpenAI 兼容端点，用户必须显式配置可信服务；早期验证用过的第三方代理不再作为默认值。密钥仅存插件设置，绝不入库。
 8. **自由度**：高度可定制——提示词、视觉策略、笔记模板、（未来）多 agent 均可改。
 
 ## v1 范围（YAGNI）
@@ -112,9 +112,9 @@
 
 ## 待确认的实现细节（实现期输入，非设计缺口）
 
-- **gpt-image-2**：已确认走 OpenAI 兼容 HTTP（`POST /v1/images/generations`）；端点 `https://freeapi.dgbmc.top/v1`。
-- **embeddings**：已改为**云端 OpenAI 兼容 API**（`POST /v1/embeddings`，默认 `BAAI/bge-m3`，设置页可「检测」端点实际可用模型并下拉选择）；向量维度由模型决定，换模型自动清空旧索引待重建。
-- **文本 LLM**：`z-ai/glm-5.1`（`https://wududu.edu.kg/v1`），上下文窗口以实测为准。
+- **图像 API**：走 OpenAI 兼容 HTTP（`POST /v1/images/generations`）；端点由用户显式配置。
+- **embeddings**：已改为**云端 OpenAI 兼容 API**（`POST /v1/embeddings`，设置页可「检测」端点实际可用模型并下拉选择）；向量维度由模型决定，换模型自动清空旧索引待重建。
+- **文本 LLM**：OpenAI 兼容 `/chat/completions`，端点和模型由用户显式配置。
 - **笔记模板字段**：frontmatter schema 细节
 
 ## 参考

@@ -6,7 +6,7 @@
 
 **Goal:** 在 Plan 1 的检索之上，做出「对话式学习导师」：聊天面板里跟导师讨论一个主题，导师**检索你的 vault**（按已知水平讲、连接旧笔记），并在你**显式命令**下产出结构化笔记、Mermaid 概念图、gpt-image-2 配图。
 
-**Architecture（基于 Plan 1 现状）:** 复用 `Retriever`（语义检索）。新增：LLM 聊天客户端（OpenAI 兼容 `/chat/completions`，glm-5.1@wududu，`requestUrl` 非流式）、导师控制器（系统提示词 + 检索注入）、侧栏聊天面板（ItemView）、三个显式命令（存笔记 / 概念图 / 配图）。视觉分工：Mermaid 概念图为主、gpt-image-2 插画为辅。密钥仍只存本地 data.json。
+**Architecture（基于 Plan 1 现状）:** 复用 `Retriever`（语义检索）。新增：LLM 聊天客户端（OpenAI 兼容 `/chat/completions`，端点和模型由用户显式配置，`requestUrl` 非流式）、导师控制器（系统提示词 + 检索注入）、侧栏聊天面板（ItemView）、三个显式命令（存笔记 / 概念图 / 配图）。视觉分工：Mermaid 概念图为主、配图为辅。密钥仍只存本地 data.json。
 
 **Tech Stack:** TypeScript、Obsidian（ItemView/Modal/requestUrl）、esbuild、Jest（仅纯函数）。
 

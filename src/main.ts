@@ -1,5 +1,5 @@
 import { Plugin, Notice, TFile, Modal, App, debounce, Platform, Editor, MarkdownFileInfo } from "obsidian";
-import { CobrainSettings, DEFAULT_SETTINGS, CobrainSettingTab } from "./settings";
+import { CobrainSettings, CobrainSettingTab, normalizeSettingsData } from "./settings";
 import { ApiEmbedder } from "./rag/apiEmbedder";
 import { VectorStore, type QueryHit } from "./rag/vectorStore";
 import { Indexer } from "./rag/indexer";
@@ -29,6 +29,8 @@ export default class CobrainPlugin extends Plugin {
   // 索引加载较重（数百分片 + 上万向量反量化），不放进 onload 关键路径，否则 Obsidian 报「加载耗时过长」。
   // onload 后台启动加载，检索/重嵌前先 await 它，确保不会查到半截索引。
   private indexReady: Promise<void> = Promise.resolve();
+  private indexQueue: Promise<void> = Promise.resolve();
+  private legacyDataIndex: unknown;
   // 多对话框支持：跟踪已打开的实例（最多 3 个）
   private activeViewIds = new Set<number>();
   private readonly MAX_VIEWS = 3;
@@ -41,9 +43,9 @@ export default class CobrainPlugin extends Plugin {
     // 索引从 index/ 分片加载（旧 index.json 会在此一次性迁移为分片）——见下方后台 loadIndex()
     this.indexStore = new IndexStore(this.app, this.manifest, this.store);
     this.embedder = new ApiEmbedder(this.settings);
-    this.indexer = new Indexer(this.app, this.embedder, this.store);
+    this.indexer = new Indexer(this.app, this.embedder, this.store, this.settings);
     // retriever 检索前会 await indexReady：启动后立刻查询也不会落空
-    this.retriever = new Retriever(this.embedder, this.store, () => this.indexReady);
+    this.retriever = new Retriever(this.embedder, this.store, this.settings, () => this.indexReady);
     const chatClient = new ChatClient(this.settings);
     this.tutor = new Tutor(this.retriever, chatClient, this.settings);
     this.image = new ImageClient(this.settings);
@@ -78,7 +80,7 @@ export default class CobrainPlugin extends Plugin {
         // 移动端为只读检索：不重建（避免蜂窝网重嵌 + 改写索引引发同步冲突），索引在桌面端建。
         if (Platform.isMobile) { new Notice("移动端为只读检索，索引请在桌面端重建"); return; }
         await this.indexReady; // 别在索引还没加载完时就重建（否则会把所有文件当"新文件"全量重嵌）
-        void this.indexer.reindexAll(this.indexStore, this.settings.embedModel);
+        void this.enqueueIndexOperation(() => this.indexer.reindexAll(this.indexStore, this.settings.embedModel, { force: true }));
       },
     });
 
@@ -105,8 +107,10 @@ export default class CobrainPlugin extends Plugin {
         // 文件在防抖窗口内被删：清掉待嵌入定时器，否则会把已删文件重新嵌回索引
         const t = this.modifyTimers.get(f.path);
         if (t) { window.clearTimeout(t); this.modifyTimers.delete(f.path); }
-        this.indexer.onDelete(f.path);
-        await this.indexStore.removeFile(f.path);
+        await this.enqueueIndexOperation(async () => {
+          this.indexer.onDelete(f.path);
+          await this.indexStore.removeFile(f.path);
+        });
       }));
       this.registerEvent(this.app.vault.on("rename", async (file, oldPath) => {
         // 改名/移动：内容没变，不重嵌——把索引条目改键到新路径，挪分片(删旧分片、写新分片)。
@@ -114,9 +118,11 @@ export default class CobrainPlugin extends Plugin {
         await this.indexReady; // 改键前确保索引已加载，否则改的是空 store
         const t = this.modifyTimers.get(oldPath);
         if (t) { window.clearTimeout(t); this.modifyTimers.delete(oldPath); }
-        this.store.renameFile(oldPath, file.path);
-        await this.indexStore.removeFile(oldPath);
-        await this.indexStore.saveFile(file.path);
+        await this.enqueueIndexOperation(async () => {
+          this.store.renameFile(oldPath, file.path);
+          await this.indexStore.removeFile(oldPath);
+          await this.indexStore.saveFile(file.path);
+        });
       }));
     }
 
@@ -138,13 +144,22 @@ export default class CobrainPlugin extends Plugin {
     // 让 Obsidian 先渲染可用，重活儿挪到 app 已经能用之后再做。
     await new Promise<void>(resolve => this.app.workspace.onLayoutReady(resolve));
     if (this.disposed) return;
-    const storedModel = await this.indexStore.load();
+    const storedModel = await this.indexStore.load({
+      legacyDataIndex: this.legacyDataIndex,
+      onMigratedLegacyDataIndex: async () => {
+        this.legacyDataIndex = undefined;
+        await this.saveSettings();
+      },
+    });
     if (this.disposed) return; // 加载期间插件被卸载：不再动设置/盘
     if (storedModel && storedModel !== this.settings.embedModel) {
       // 换过嵌入模型 → 维度/空间不兼容，清空待重建
-      this.store.deserialize(null);
-      await this.indexStore.clearAll();
-      new Notice("嵌入模型已变更，旧索引已清空，请重新「Cobrain: 重建索引」");
+      if (Platform.isMobile) {
+        new Notice("嵌入模型已变更；移动端只读，请在桌面端重建索引");
+      } else {
+        await this.resetIndexForEmbedModelChange();
+        new Notice("嵌入模型已变更，旧索引已清空，请重新「Cobrain: 重建索引」");
+      }
     }
   }
 
@@ -159,13 +174,27 @@ export default class CobrainPlugin extends Plugin {
   // data.json 现在只存设置；向量索引在 index/ 分片里（见 IndexStore）。
   async loadSettings() {
     const data = await this.loadData();
-    // loadData 返回 any，我们知道它要么是 null/undefined 要么是带 settings 的对象
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, (data && typeof data === "object" && "settings" in data) ? data.settings : {});
+    const normalized = normalizeSettingsData(data);
+    this.settings = normalized.settings;
+    this.legacyDataIndex = normalized.legacyIndex;
   }
 
   // 只写设置（极小）。索引在 index/ 分片里，与设置彻底解耦。
   async saveSettings() {
     await this.saveData({ settings: this.settings });
+  }
+
+  async resetIndexForEmbedModelChange(): Promise<void> {
+    await this.enqueueIndexOperation(async () => {
+      this.store.deserialize(null);
+      await this.indexStore.clearAll();
+    });
+  }
+
+  private enqueueIndexOperation<T>(op: () => Promise<T>): Promise<T> {
+    const run = this.indexQueue.catch(() => undefined).then(op);
+    this.indexQueue = run.then(() => undefined, () => undefined);
+    return run;
   }
 
   // 防抖重嵌：编辑停顿约 2.5s 才嵌入变更文件。失败冒泡为 Notice，不再静默吞掉（旧代码无 catch）。
@@ -179,8 +208,7 @@ export default class CobrainPlugin extends Plugin {
         if (this.disposed) return; // 卸载后不再写盘
         // 先 await indexReady：避免索引还没加载完就 onModify，把条目写进半截 store
         this.indexReady
-          .then(() => this.indexer.onModify(file))
-          .then((changed) => { if (changed) return this.indexStore.saveFile(file.path); })
+          .then(() => this.enqueueIndexOperation(() => this.indexer.onModify(file, this.indexStore)))
           .catch((e) =>
             new Notice(`索引更新失败：${file.path}：${e instanceof Error ? e.message : String(e)}`),
           );
@@ -190,10 +218,11 @@ export default class CobrainPlugin extends Plugin {
 
   // 打开新的对话窗口（最多 3 个）
   async openNewChatView(): Promise<void> {
+    const activeIds = this.getActiveViewIdsFromWorkspace();
     // 找第一个未使用的 ID
     let freeId = 0;
     for (let i = 1; i <= this.MAX_VIEWS; i++) {
-      if (!this.activeViewIds.has(i)) {
+      if (!activeIds.has(i)) {
         freeId = i;
         break;
       }
@@ -233,6 +262,15 @@ export default class CobrainPlugin extends Plugin {
   // 释放视图 ID（ChatView 在 onClose 时调用）
   releaseViewId(id: number): void {
     this.activeViewIds.delete(id);
+  }
+
+  private getActiveViewIdsFromWorkspace(): Set<number> {
+    const ids = new Set<number>();
+    for (let i = 1; i <= this.MAX_VIEWS; i++) {
+      if (this.app.workspace.getLeavesOfType(`${VIEW_TYPE_COBRAIN_CHAT}-${i}`).length > 0) ids.add(i);
+    }
+    this.activeViewIds = ids;
+    return ids;
   }
 
   // 「测试检索」命令：跑检索并弹结果。抽成方法以便命令回调返回 void（避免把 async 直接塞进期望 void 的参数）。

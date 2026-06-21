@@ -51,7 +51,7 @@ export class VectorStore {
     this.hashes[path] = hash;
   }
 
-  query(vector: number[], k: number): QueryHit[] {
+  query(vector: number[], k: number, minScore = -Infinity): QueryHit[] {
     // 维度守卫：查询向量与索引向量维度不一致 → 换过模型但没重建索引。
     // 不拦截的话点积会算出垃圾且不报错（曾踩过这个坑）。
     if (this.entries.length && this.entries[0].vector.length !== vector.length) {
@@ -70,6 +70,7 @@ export class VectorStore {
     for (const { e, score } of scored) {
       if (seen.has(e.path)) continue;
       seen.add(e.path);
+      if (score < minScore) continue;
       hits.push({ path: e.path, text: e.text, heading: e.heading, score });
       if (hits.length >= k) break;
     }

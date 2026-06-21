@@ -8,7 +8,12 @@ const META = "meta.json";
 const SHARD_V = 3;
 
 export class IndexStore {
-  constructor(private app: App, private manifest: PluginManifest, private store: VectorStore) {}
+  constructor(
+    private app: App,
+    private manifest: PluginManifest,
+    private store: VectorStore,
+    private readOnly = Platform.isMobile,
+  ) {}
 
   private get adapter() { return this.app.vault.adapter; }
   private base(): string { return this.manifest.dir ?? `${this.app.vault.configDir}/plugins/${this.manifest.id}`; }
@@ -19,7 +24,7 @@ export class IndexStore {
   private shardPath(path: string): string { return normalizePath(`${this.dir()}/${this.shardName(path)}`); }
 
   // 启动加载：优先 index/ 分片；否则迁移旧 index.json；返回存储的 embedModel(换模型检测用)。
-  async load(): Promise<string | undefined> {
+  async load(opts: { legacyDataIndex?: unknown; onMigratedLegacyDataIndex?: () => Promise<void> } = {}): Promise<string | undefined> {
     if (await this.adapter.exists(this.dir())) {
       let embedModel: string | undefined;
       const listed = await this.adapter.list(this.dir());
@@ -48,8 +53,6 @@ export class IndexStore {
         try { this.store.deserializeFile(JSON.parse(c.txt)); }
         catch (e) { console.error("Cobrain: 分片解析失败", c.f, e); }
       }
-      // 同步可能把旧单文件 index.json 带回来：以 index/ 为准，清掉它
-      if (await this.adapter.exists(this.legacyPath())) await this.adapter.remove(this.legacyPath()).catch(() => {});
       return embedModel;
     }
     // 迁移：旧单文件 index.json → 分片(首次加载一次性)。早于 #1 的 data.json.index 不再处理(那类装机早已迁移)。
@@ -62,39 +65,53 @@ export class IndexStore {
         const embedModel = (payload && typeof payload === "object" && "embedModel" in payload && typeof payload.embedModel === "string")
           ? payload.embedModel : undefined;
         await this.saveAll(embedModel);
-        await this.adapter.remove(this.legacyPath()).catch(() => {});
+        if (!this.readOnly) await this.adapter.remove(this.legacyPath());
         return embedModel;
       } catch (e) {
         console.error("Cobrain: 旧 index.json 迁移失败，按空索引处理", e);
+      }
+    }
+    if (opts.legacyDataIndex && typeof opts.legacyDataIndex === "object") {
+      try {
+        const payload = opts.legacyDataIndex as { entries?: unknown[]; mtimes?: Record<string, number>; hashes?: Record<string, string>; embedModel?: unknown };
+        this.store.deserialize(payload);
+        const embedModel = typeof payload.embedModel === "string" ? payload.embedModel : undefined;
+        if (!this.readOnly) {
+          await this.saveAll(embedModel);
+          await opts.onMigratedLegacyDataIndex?.();
+        }
+        return embedModel;
+      } catch (e) {
+        console.error("Cobrain: data.json.index 迁移失败，按空索引处理", e);
       }
     }
     return undefined;
   }
 
   async saveFile(path: string): Promise<void> {
-    if (Platform.isMobile) return;
+    if (this.readOnly) return;
     const sf = this.store.serializeFile(path);
     if (!sf) { await this.removeFile(path); return; }
-    await this.adapter.mkdir(this.dir()).catch(() => {});
+    await this.ensureDir(this.dir());
     await this.adapter.write(this.shardPath(path), JSON.stringify(sf));
   }
 
   async removeFile(path: string): Promise<void> {
-    if (Platform.isMobile) return;
+    if (this.readOnly) return;
     const p = this.shardPath(path);
-    if (await this.adapter.exists(p)) await this.adapter.remove(p).catch(() => {});
+    if (await this.adapter.exists(p)) await this.adapter.remove(p);
   }
 
   async saveMeta(embedModel: string): Promise<void> {
-    if (Platform.isMobile) return;
-    await this.adapter.mkdir(this.dir()).catch(() => {});
+    if (this.readOnly) return;
+    await this.ensureDir(this.dir());
     await this.adapter.write(this.metaPath(), JSON.stringify({ v: SHARD_V, embedModel }));
   }
 
   // 全量写出所有分片 + meta + 清孤儿(迁移用)。
   async saveAll(embedModel?: string): Promise<void> {
-    if (Platform.isMobile) return;
-    await this.adapter.mkdir(this.dir()).catch(() => {});
+    if (this.readOnly) return;
+    await this.ensureDir(this.dir());
     const wanted = new Set<string>([META]);
     for (const path of this.store.allPaths()) {
       const sf = this.store.serializeFile(path);
@@ -121,13 +138,22 @@ export class IndexStore {
     const listed = await this.adapter.list(this.dir());
     for (const f of listed.files) {
       const name = f.split("/").pop() ?? "";
-      if (name.endsWith(".json") && !wanted.has(name)) await this.adapter.remove(f).catch(() => {});
+      if (name.endsWith(".json") && !wanted.has(name)) await this.adapter.remove(f);
     }
   }
 
   // 换嵌入模型/清空：删掉整个 index/(store 已在外层 deserialize(null))。
   async clearAll(): Promise<void> {
-    if (Platform.isMobile) return;
-    if (await this.adapter.exists(this.dir())) await this.adapter.rmdir(this.dir(), true).catch(() => {});
+    if (this.readOnly) return;
+    if (await this.adapter.exists(this.dir())) await this.adapter.rmdir(this.dir(), true);
+  }
+
+  private async ensureDir(dir: string): Promise<void> {
+    const parts = normalizePath(dir).split("/").filter(Boolean);
+    let cur = "";
+    for (const part of parts) {
+      cur = cur ? `${cur}/${part}` : part;
+      if (!(await this.adapter.exists(cur))) await this.adapter.mkdir(cur);
+    }
   }
 }

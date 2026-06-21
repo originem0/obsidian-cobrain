@@ -559,12 +559,12 @@ export interface LTSettings {
 }
 
 export const DEFAULT_SETTINGS: LTSettings = {
-  llmBaseUrl: "https://wududu.edu.kg/v1",
+  llmBaseUrl: "",
   llmKey: "",
-  llmModel: "z-ai/glm-5.1",
-  imageBaseUrl: "https://freeapi.dgbmc.top/v1",
+  llmModel: "",
+  imageBaseUrl: "",
   imageKey: "",
-  imageModel: "gpt-image-2",
+  imageModel: "",
   embedModel: "Xenova/multilingual-e5-small",
   noteFolder: "学习导师",
   attachmentFolder: "学习导师/附件",

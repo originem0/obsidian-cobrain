@@ -142,3 +142,12 @@ test("renameFile 把条目/mtime/hash 改键到新路径（不重嵌）", () => 
   expect(s.query([1, 0], 1)[0].path).toBe("new.md");
   expect(s.allPaths()).toEqual(["new.md"]);
 });
+
+test("query 按最低分过滤命中", () => {
+  const s = new VectorStore();
+  s.setFile("a.md", 1, [{ text: "a", heading: "", vector: [1, 0] }]);
+  s.setFile("b.md", 1, [{ text: "b", heading: "", vector: [0.1, 0.9] }]);
+
+  const hits = s.query([1, 0], 5, 0.2);
+  expect(hits.map(h => h.path)).toEqual(["a.md"]);
+});
