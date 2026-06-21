@@ -55,13 +55,15 @@ export class ChatView extends ItemView {
   private sendBtn!: HTMLButtonElement;
   private busy = false; // 一次只跑一轮 ask，避免连发导致 history 交错
   private pendingSourceContext: string | null = null; // 引用带来的源笔记小节，只喂给紧接着的那一问
+  private instanceId: number; // 实例 ID（1/2/3）
 
-  constructor(leaf: WorkspaceLeaf, private plugin: CobrainPlugin) {
+  constructor(leaf: WorkspaceLeaf, private plugin: CobrainPlugin, instanceId: number = 1) {
     super(leaf);
+    this.instanceId = instanceId;
   }
 
-  getViewType(): string { return VIEW_TYPE_COBRAIN_CHAT; }
-  getDisplayText(): string { return "创作副脑"; }
+  getViewType(): string { return `${VIEW_TYPE_COBRAIN_CHAT}-${this.instanceId}`; }
+  getDisplayText(): string { return `创作副脑 #${this.instanceId}`; }
   getIcon(): string { return "brain"; }
 
   async onOpen(): Promise<void> {
@@ -448,6 +450,8 @@ export class ChatView extends ItemView {
 
   async onClose(): Promise<void> {
     this.contentEl.empty();
+    // 释放实例 ID，允许再次使用这个槽位
+    this.plugin.releaseViewId(this.instanceId);
   }
 }
 

@@ -29,6 +29,9 @@ export default class CobrainPlugin extends Plugin {
   // 索引加载较重（数百分片 + 上万向量反量化），不放进 onload 关键路径，否则 Obsidian 报「加载耗时过长」。
   // onload 后台启动加载，检索/重嵌前先 await 它，确保不会查到半截索引。
   private indexReady: Promise<void> = Promise.resolve();
+  // 多对话框支持：跟踪已打开的实例（最多 3 个）
+  private activeViewIds = new Set<number>();
+  private readonly MAX_VIEWS = 3;
 
   async onload() {
     await this.loadSettings();
@@ -45,7 +48,11 @@ export default class CobrainPlugin extends Plugin {
     this.tutor = new Tutor(this.retriever, chatClient, this.settings);
     this.image = new ImageClient(this.settings);
 
-    this.registerView(VIEW_TYPE_COBRAIN_CHAT, (leaf) => new ChatView(leaf, this));
+    // 注册 3 个独立的对话视图类型
+    for (let i = 1; i <= this.MAX_VIEWS; i++) {
+      this.registerView(`${VIEW_TYPE_COBRAIN_CHAT}-${i}`, (leaf) => new ChatView(leaf, this, i));
+    }
+
     this.app.workspace.onLayoutReady(() => {
       // 改名收尾：清掉旧视图类型 "lt-chat" 残留的孤儿面板（改名后该类型已不再注册）
       this.app.workspace.detachLeavesOfType("lt-chat");
@@ -57,11 +64,11 @@ export default class CobrainPlugin extends Plugin {
         }));
       }
     });
-    this.addRibbonIcon("brain", "创作副脑", () => this.activateChatView());
+    this.addRibbonIcon("brain", "创作副脑", () => void this.openNewChatView());
     this.addCommand({
       id: "open-tutor",
       name: "打开创作副脑",
-      callback: () => this.activateChatView(),
+      callback: () => void this.openNewChatView(),
     });
 
     this.addCommand({
@@ -181,15 +188,51 @@ export default class CobrainPlugin extends Plugin {
     );
   }
 
+  // 打开新的对话窗口（最多 3 个）
+  async openNewChatView(): Promise<void> {
+    // 找第一个未使用的 ID
+    let freeId = 0;
+    for (let i = 1; i <= this.MAX_VIEWS; i++) {
+      if (!this.activeViewIds.has(i)) {
+        freeId = i;
+        break;
+      }
+    }
+
+    if (freeId === 0) {
+      new Notice(`最多同时打开 ${this.MAX_VIEWS} 个对话窗口`);
+      return;
+    }
+
+    const viewType = `${VIEW_TYPE_COBRAIN_CHAT}-${freeId}`;
+    const leaf = this.app.workspace.getRightLeaf(false)!;
+    await leaf.setViewState({ type: viewType, active: true });
+    await this.app.workspace.revealLeaf(leaf);
+    this.activeViewIds.add(freeId);
+  }
+
+  // 获取或打开第一个对话窗口（用于「引用进 Cobrain」）
   async activateChatView(): Promise<ChatView | null> {
     const { workspace } = this.app;
-    let leaf = workspace.getLeavesOfType(VIEW_TYPE_COBRAIN_CHAT)[0];
-    if (!leaf) {
-      leaf = workspace.getRightLeaf(false)!;
-      await leaf.setViewState({ type: VIEW_TYPE_COBRAIN_CHAT, active: true });
+
+    // 优先找已打开的任意一个
+    for (let i = 1; i <= this.MAX_VIEWS; i++) {
+      const leaves = workspace.getLeavesOfType(`${VIEW_TYPE_COBRAIN_CHAT}-${i}`);
+      if (leaves.length > 0) {
+        await workspace.revealLeaf(leaves[0]);
+        return leaves[0].view instanceof ChatView ? leaves[0].view : null;
+      }
     }
-    await workspace.revealLeaf(leaf);
-    return leaf.view instanceof ChatView ? leaf.view : null;
+
+    // 没有打开的，创建第一个
+    await this.openNewChatView();
+    const leaves = workspace.getLeavesOfType(`${VIEW_TYPE_COBRAIN_CHAT}-1`);
+    return leaves[0]?.view instanceof ChatView ? leaves[0].view : null;
+  }
+
+  // 释放视图 ID（ChatView 在 onClose 时调用）
+  releaseViewId(id: number): void {
+    this.activeViewIds.delete(id);
   }
 
   // 「测试检索」命令：跑检索并弹结果。抽成方法以便命令回调返回 void（避免把 async 直接塞进期望 void 的参数）。
