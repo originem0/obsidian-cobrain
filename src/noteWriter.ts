@@ -25,13 +25,14 @@ export async function saveNote(app: App, settings: CobrainSettings, p: NotePaylo
   const date = new Date().toISOString().slice(0, 10);
   // 标签来自设置（中/英文逗号分隔）；空则不写 tags
   const tags = (settings.noteTags || "").split(/[，,]/).map(t => t.trim()).filter(Boolean);
-  const parts: string[] = ["---", `created: ${date}`];
+  const parts: string[] = ["---", `date: ${date}`];
   if (tags.length) parts.push(`tags: [${tags.join(", ")}]`);
+  parts.push("status: seedling");
   parts.push("---", "", `# ${p.title}`, "", p.body, "");
   if (p.mermaid) parts.push(p.mermaid, "");
   if (p.imageEmbed) parts.push(p.imageEmbed, "");
   if (p.sources?.length) {
-    parts.push("## 相关笔记", "");
+    parts.push("## 相关", "");
     for (const s of p.sources) parts.push(`- [[${s.replace(/\.md$/, "")}]]`);
   }
   if (p.conversation) {
