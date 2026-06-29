@@ -7,6 +7,13 @@ import { IndexStore } from "./indexStore";
 import type { CobrainSettings } from "../settings";
 
 export type IndexFileResult = "saved" | "removed" | "unchanged";
+export interface IndexFailure { path: string; message: string; at: number; }
+export interface IndexStatus {
+  running: boolean;
+  lastChangedAt: number | null;
+  lastFullReindexAt: number | null;
+  failures: IndexFailure[];
+}
 
 function excludedFolders(raw: string): string[] {
   return raw
@@ -25,6 +32,9 @@ export function shouldIndexPath(path: string, settings: Pick<CobrainSettings, "i
 
 export class Indexer {
   private running = false; // 防「重建索引」重入：两个全量重建并发会互踩 store 与分片写
+  private lastChangedAt: number | null = null;
+  private lastFullReindexAt: number | null = null;
+  private failures: IndexFailure[] = [];
   constructor(
     private app: App,
     private embedder: Embedder,
@@ -36,6 +46,7 @@ export class Indexer {
     if (!shouldIndexPath(file.path, this.settings)) {
       this.store.removeFile(file.path);
       await persist.removeFile(file.path);
+      this.markChanged(file.path);
       return "removed";
     }
     const content = await this.app.vault.cachedRead(file);
@@ -46,6 +57,7 @@ export class Indexer {
       if (this.store.getMtime(file.path) !== file.stat.mtime) {
         this.store.setMtime(file.path, file.stat.mtime);
         await persist.saveFile(file.path);
+        this.markChanged(file.path);
         return "saved";
       }
       return "unchanged";
@@ -54,6 +66,7 @@ export class Indexer {
     if (chunks.length === 0) {
       this.store.removeFile(file.path);
       await persist.removeFile(file.path);
+      this.markChanged(file.path);
       return "removed";
     }
     // 内容已变，旧向量不能继续冒充新文件。先移除旧分片；嵌入失败时宁可无索引。
@@ -70,7 +83,31 @@ export class Indexer {
     );
     this.store.setHash(file.path, hash);
     await persist.saveFile(file.path);
+    this.markChanged(file.path);
     return "saved";
+  }
+
+  private markChanged(path: string): void {
+    this.lastChangedAt = Date.now();
+    this.failures = this.failures.filter(f => f.path !== path);
+  }
+
+  recordChange(path: string): void {
+    this.markChanged(path);
+  }
+
+  recordFailure(path: string, e: unknown): void {
+    const message = e instanceof Error ? e.message : String(e);
+    this.failures = [{ path, message, at: Date.now() }, ...this.failures.filter(f => f.path !== path)].slice(0, 20);
+  }
+
+  getStatus(): IndexStatus {
+    return {
+      running: this.running,
+      lastChangedAt: this.lastChangedAt,
+      lastFullReindexAt: this.lastFullReindexAt,
+      failures: [...this.failures],
+    };
   }
 
   // 全量：跳过 mtime 未变的文件；删除已不存在文件的分片；每篇即时落分片(崩溃不丢进度)，结束写 meta + 清孤儿。
@@ -93,6 +130,7 @@ export class Indexer {
           } catch (e) {
             // 单篇失败(如嵌入 API 抖动)不中断整轮；记数继续，结束时汇报
             failed++;
+            this.recordFailure(f.path, e);
             this.store.removeFile(f.path);
             await persist.removeFile(f.path);
             console.error(`索引失败：${f.path}`, e);
@@ -102,6 +140,7 @@ export class Indexer {
         notice.setMessage(`索引中… ${done}/${files.length}`);
       }
       await persist.finalize(embedModel);
+      this.lastFullReindexAt = Date.now();
       new Notice(
         failed ? `索引完成：${files.length} 篇，${failed} 篇失败（见控制台）` : `索引完成：${files.length} 篇`,
       );
@@ -115,5 +154,8 @@ export class Indexer {
   async onModify(file: TFile, persist: IndexStore): Promise<IndexFileResult> {
     return this.indexFile(file, persist, false);
   }
-  onDelete(path: string): void { this.store.removeFile(path); }
+  onDelete(path: string): void {
+    this.store.removeFile(path);
+    this.markChanged(path);
+  }
 }

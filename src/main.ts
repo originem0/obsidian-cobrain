@@ -5,11 +5,83 @@ import { VectorStore, type QueryHit } from "./rag/vectorStore";
 import { Indexer } from "./rag/indexer";
 import { Retriever } from "./rag/retriever";
 import { ChatClient } from "./llm/chatClient";
+import type { ChatMsg } from "./llm/chatClient";
 import { Tutor } from "./tutor/tutor";
 import { ChatView, VIEW_TYPE_COBRAIN_CHAT } from "./ui/chatView";
 import { ImageClient } from "./llm/imageClient";
 import { buildQuote, findHeadingAbove, extractContext } from "./util/quote";
 import { IndexStore } from "./rag/indexStore";
+import type { IndexFailure } from "./rag/indexer";
+
+export interface SavedNoteState {
+  stateSignature: string;
+  path: string;
+  savedAt: number;
+}
+
+export interface ChatDraft {
+  history: ChatMsg[];
+  sources: string[];
+  lastMermaid: string | null;
+  lastImageEmbed: string | null;
+  lastSavedNote: SavedNoteState | null;
+  savedAt: number;
+}
+
+function askDraftChoice(app: App, id: number): Promise<"restore" | "new" | null> {
+  return new Promise(resolve => {
+    let done = false;
+    const finish = (v: "restore" | "new" | null) => { if (!done) { done = true; resolve(v); } };
+    const m = new DraftChoiceModal(app, id, finish);
+    const close = m.onClose.bind(m);
+    m.onClose = () => { close(); finish(null); };
+    m.open();
+  });
+}
+
+export function normalizeChatDrafts(raw: unknown): Record<number, ChatDraft> {
+  const out: Record<number, ChatDraft> = {};
+  if (!raw || typeof raw !== "object") return out;
+  const source = raw as Record<string, unknown>;
+  for (const key of Object.keys(source)) {
+    const id = Number(key);
+    if (!Number.isInteger(id) || id < 1 || id > 3) continue;
+    const d = source[key];
+    if (!d || typeof d !== "object") continue;
+    const obj = d as Record<string, unknown>;
+    const rawHistory = Array.isArray(obj.history) ? obj.history : [];
+    const history = rawHistory.flatMap((m): ChatMsg[] => {
+      if (!m || typeof m !== "object") return [];
+      const msg = m as Record<string, unknown>;
+      const role = msg.role;
+      const content = msg.content;
+      if ((role === "user" || role === "assistant") && typeof content === "string") return [{ role, content }];
+      return [];
+    });
+    if (!history.length) continue;
+    const rawLastSaved = obj.lastSavedNote;
+    const lastSavedNote =
+      rawLastSaved && typeof rawLastSaved === "object"
+        && typeof (rawLastSaved as Record<string, unknown>).stateSignature === "string"
+        && typeof (rawLastSaved as Record<string, unknown>).path === "string"
+        && typeof (rawLastSaved as Record<string, unknown>).savedAt === "number"
+        ? {
+          stateSignature: (rawLastSaved as Record<string, unknown>).stateSignature as string,
+          path: (rawLastSaved as Record<string, unknown>).path as string,
+          savedAt: (rawLastSaved as Record<string, unknown>).savedAt as number,
+        }
+        : null;
+    out[id] = {
+      history: history.slice(-80),
+      sources: Array.isArray(obj.sources) ? obj.sources.filter((v): v is string => typeof v === "string").slice(0, 80) : [],
+      lastMermaid: typeof obj.lastMermaid === "string" ? obj.lastMermaid : null,
+      lastImageEmbed: typeof obj.lastImageEmbed === "string" ? obj.lastImageEmbed : null,
+      lastSavedNote,
+      savedAt: typeof obj.savedAt === "number" && Number.isFinite(obj.savedAt) ? obj.savedAt : Date.now(),
+    };
+  }
+  return out;
+}
 
 export default class CobrainPlugin extends Plugin {
   settings!: CobrainSettings;
@@ -29,8 +101,10 @@ export default class CobrainPlugin extends Plugin {
   // 索引加载较重（数百分片 + 上万向量反量化），不放进 onload 关键路径，否则 Obsidian 报「加载耗时过长」。
   // onload 后台启动加载，检索/重嵌前先 await 它，确保不会查到半截索引。
   private indexReady: Promise<void> = Promise.resolve();
+  private indexLoaded = false;
   private indexQueue: Promise<void> = Promise.resolve();
   private legacyDataIndex: unknown;
+  private chatDrafts: Record<number, ChatDraft> = {};
   // 多对话框支持：跟踪已打开的实例（最多 3 个）
   private activeViewIds = new Set<number>();
   private readonly MAX_VIEWS = 3;
@@ -91,6 +165,12 @@ export default class CobrainPlugin extends Plugin {
     });
 
     this.addCommand({
+      id: "index-status",
+      name: "查看索引状态",
+      callback: () => void this.showIndexStatus(),
+    });
+
+    this.addCommand({
       id: "quote-selection",
       name: "引用选中文本",
       editorCallback: (editor, ctx) => void this.quoteSelection(editor, ctx),
@@ -122,6 +202,7 @@ export default class CobrainPlugin extends Plugin {
           this.store.renameFile(oldPath, file.path);
           await this.indexStore.removeFile(oldPath);
           await this.indexStore.saveFile(file.path);
+          this.indexer.recordChange(file.path);
         });
       }));
     }
@@ -161,6 +242,7 @@ export default class CobrainPlugin extends Plugin {
         new Notice("嵌入模型已变更，旧索引已清空，请重新「Cobrain: 重建索引」");
       }
     }
+    this.indexLoaded = true;
   }
 
   onunload() {
@@ -177,11 +259,65 @@ export default class CobrainPlugin extends Plugin {
     const normalized = normalizeSettingsData(data);
     this.settings = normalized.settings;
     this.legacyDataIndex = normalized.legacyIndex;
+    const source = data && typeof data === "object" && "chatDrafts" in data
+      ? (data as Record<string, unknown>).chatDrafts
+      : undefined;
+    this.chatDrafts = normalizeChatDrafts(source);
   }
 
   // 只写设置（极小）。索引在 index/ 分片里，与设置彻底解耦。
   async saveSettings() {
-    await this.saveData({ settings: this.settings });
+    await this.saveData({ settings: this.settings, chatDrafts: this.chatDrafts });
+  }
+
+  chatWelcomeText(): string {
+    const chatProblem = this.chatConfigProblem();
+    if (chatProblem) return `${chatProblem} 配好后再开始对话。`;
+    const missingEmbed = this.embedConfigProblem();
+    if (missingEmbed) return `${missingEmbed} 现在只能普通对话，不能翻旧笔记。`;
+    if (!this.indexLoaded) return "索引正在加载。现在可以先普通对话，加载完后会检索旧笔记。";
+    if (this.store.allPaths().length === 0) {
+      return "索引还是空的。先运行「Cobrain: 重建索引」，否则我翻不出你写过的旧笔记。";
+    }
+    return "聊你正在想的。我会翻出你写过的相关旧笔记，并回抛问题逼你自己想。下方：概念图 / 推敲 / 配图 / 存为笔记。";
+  }
+
+  whenIndexReady(): Promise<void> {
+    return this.indexReady;
+  }
+
+  chatConfigProblem(): string | null {
+    const s = this.settings;
+    if (!s.llmBaseUrl || !s.llmKey || !s.llmModel) return "请先在设置里配好文本 LLM 的 Base URL、API Key 和 Model。";
+    return null;
+  }
+
+  embedConfigProblem(): string | null {
+    const s = this.settings;
+    if (!s.embedBaseUrl || !s.embedKey || !s.embedModel) return "请先在设置里配好嵌入 API 的 Base URL、API Key 和 Model。";
+    return null;
+  }
+
+  getChatDraft(id: number): ChatDraft | null {
+    return this.chatDrafts[id] ?? null;
+  }
+
+  clearChatDraft(id: number): void {
+    delete this.chatDrafts[id];
+    void this.saveSettings();
+  }
+
+  saveChatDraft(id: number, draft: Omit<ChatDraft, "savedAt">): void {
+    if (!draft.history.length) delete this.chatDrafts[id];
+    else {
+      this.chatDrafts[id] = {
+        ...draft,
+        history: draft.history.slice(-80),
+        sources: draft.sources.slice(0, 80),
+        savedAt: Date.now(),
+      };
+    }
+    void this.saveSettings();
   }
 
   async resetIndexForEmbedModelChange(): Promise<void> {
@@ -209,9 +345,10 @@ export default class CobrainPlugin extends Plugin {
         // 先 await indexReady：避免索引还没加载完就 onModify，把条目写进半截 store
         this.indexReady
           .then(() => this.enqueueIndexOperation(() => this.indexer.onModify(file, this.indexStore)))
-          .catch((e) =>
-            new Notice(`索引更新失败：${file.path}：${e instanceof Error ? e.message : String(e)}`),
-          );
+          .catch((e) => {
+            this.indexer.recordFailure(file.path, e);
+            new Notice(`索引更新失败：${file.path}：${e instanceof Error ? e.message : String(e)}`);
+          });
       }, 2500),
     );
   }
@@ -231,6 +368,12 @@ export default class CobrainPlugin extends Plugin {
     if (freeId === 0) {
       new Notice(`最多同时打开 ${this.MAX_VIEWS} 个对话窗口`);
       return;
+    }
+
+    if (this.chatDrafts[freeId]) {
+      const choice = await askDraftChoice(this.app, freeId);
+      if (!choice) return;
+      if (choice === "new") this.clearChatDraft(freeId);
     }
 
     const viewType = `${VIEW_TYPE_COBRAIN_CHAT}-${freeId}`;
@@ -283,6 +426,24 @@ export default class CobrainPlugin extends Plugin {
     }
   }
 
+  private async showIndexStatus(): Promise<void> {
+    try {
+      await this.indexReady;
+    } catch {
+      // 状态面板仍然要能打开；失败详情通常已经在控制台。
+    }
+    const status = this.indexer.getStatus();
+    new IndexStatusModal(this.app, {
+      indexedFiles: this.store.allPaths().length,
+      chunks: this.store.entryCount(),
+      embedModel: this.settings.embedModel || "未配置",
+      running: status.running,
+      lastChangedAt: status.lastChangedAt,
+      lastFullReindexAt: status.lastFullReindexAt,
+      failures: status.failures,
+    }).open();
+  }
+
   // 选中文本 → 引用进 Cobrain：取选区 + 来源链接 + 最近标题 + 所在小节，预填进面板（不自动发）。
   private async quoteSelection(editor: Editor, ctx: MarkdownFileInfo): Promise<void> {
     const sel = editor.getSelection();
@@ -313,6 +474,30 @@ class QueryModal extends Modal {
   onClose() { this.contentEl.empty(); }
 }
 
+class DraftChoiceModal extends Modal {
+  constructor(
+    app: App,
+    private id: number,
+    private onPick: (v: "restore" | "new" | null) => void,
+  ) { super(app); }
+
+  onOpen() {
+    this.contentEl.createEl("h3", { text: `创作副脑 #${this.id} 有未结束草稿` });
+    this.contentEl.createEl("p", { text: "恢复会继续上次对话。新建会清空这个槽位的草稿。" });
+    const row = this.contentEl.createDiv();
+    row.setCssStyles({ display: "flex", gap: "8px", justifyContent: "flex-end", marginTop: "12px", flexWrap: "wrap" });
+    const cancel = row.createEl("button", { text: "取消" });
+    const fresh = row.createEl("button", { text: "新建空对话" });
+    const restore = row.createEl("button", { text: "恢复草稿" });
+    restore.classList.add("mod-cta");
+    cancel.onclick = () => { this.onPick(null); this.close(); };
+    fresh.onclick = () => { this.onPick("new"); this.close(); };
+    restore.onclick = () => { this.onPick("restore"); this.close(); };
+  }
+
+  onClose() { this.contentEl.empty(); }
+}
+
 // 检索结果弹窗：展示分数 + 路径 + 标题 + 正文片段，便于人工判断检索质量
 class ResultsModal extends Modal {
   constructor(app: App, private query: string, private hits: QueryHit[]) { super(app); }
@@ -336,5 +521,48 @@ class ResultsModal extends Modal {
       body.setCssStyles({ opacity: "0.7", fontSize: "0.85em", marginTop: "2px" });
     });
   }
+  onClose() { this.contentEl.empty(); }
+}
+
+class IndexStatusModal extends Modal {
+  constructor(
+    app: App,
+    private status: {
+      indexedFiles: number;
+      chunks: number;
+      embedModel: string;
+      running: boolean;
+      lastChangedAt: number | null;
+      lastFullReindexAt: number | null;
+      failures: IndexFailure[];
+    },
+  ) { super(app); }
+
+  onOpen() {
+    const { contentEl } = this;
+    const fmt = (ts: number | null) => ts ? new Date(ts).toLocaleString() : "本次启动后暂无记录";
+    contentEl.createEl("h3", { text: "索引状态" });
+    contentEl.createEl("p", { text: `状态：${this.status.running ? "正在索引" : "空闲"}` });
+    contentEl.createEl("p", { text: `嵌入模型：${this.status.embedModel}` });
+    contentEl.createEl("p", { text: `已索引笔记：${this.status.indexedFiles} 篇` });
+    contentEl.createEl("p", { text: `分片数量：${this.status.chunks} 个` });
+    contentEl.createEl("p", { text: `最近更新：${fmt(this.status.lastChangedAt)}` });
+    contentEl.createEl("p", { text: `最近全量重建：${fmt(this.status.lastFullReindexAt)}` });
+
+    contentEl.createEl("h4", { text: "最近失败" });
+    if (!this.status.failures.length) {
+      contentEl.createEl("p", { text: "无" });
+      return;
+    }
+    for (const f of this.status.failures.slice(0, 10)) {
+      const row = contentEl.createDiv();
+      row.setCssStyles({ margin: "0 0 10px" });
+      row.createEl("div", { text: `${new Date(f.at).toLocaleString()} · ${f.path}` })
+        .setCssStyles({ fontWeight: "600" });
+      row.createEl("div", { text: f.message })
+        .setCssStyles({ color: "var(--text-muted)", fontSize: "0.85em" });
+    }
+  }
+
   onClose() { this.contentEl.empty(); }
 }

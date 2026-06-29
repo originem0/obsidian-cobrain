@@ -3,11 +3,67 @@ import type { ChatMsg } from "../llm/chatClient";
 import type { QueryHit } from "../rag/vectorStore";
 import { saveNote, saveImage } from "../noteWriter";
 import { extractMermaid } from "../util/mermaid";
+import { fnv1a } from "../util/hash";
 import type CobrainPlugin from "../main";
+import type { SavedNoteState } from "../main";
 
 export const VIEW_TYPE_COBRAIN_CHAT = "cobrain-chat";
 
 const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e));
+const CHAT_CONTEXT_MSG_LIMIT = 20;
+
+export function chatStateSignature(
+  history: ChatMsg[],
+  sources: string[],
+  mermaid: string | null,
+  imageEmbed: string | null,
+): string {
+  return fnv1a(JSON.stringify({
+    history,
+    sources: [...sources].sort(),
+    mermaid,
+    imageEmbed,
+  }));
+}
+
+export function chatHistoryForModel(history: ChatMsg[]): ChatMsg[] {
+  return history.slice(-CHAT_CONTEXT_MSG_LIMIT);
+}
+
+export function chatContextLimitText(historyLength: number): string | null {
+  if (historyLength <= CHAT_CONTEXT_MSG_LIMIT) return null;
+  return `更早的 ${historyLength - CHAT_CONTEXT_MSG_LIMIT} 条消息已保存在草稿里，但本轮不会发给模型。`;
+}
+
+// 带秒数计时的等待气泡：创建即开始计时，stop() 清计时器并移除气泡。
+// 把「思考中」从不可观测的等待变成可观测的等待——用户知道副脑在跑、跑了多久。
+function thinkingBubble(parent: HTMLElement, label: string): { el: HTMLElement; stop: () => void } {
+  const el = parent.createDiv({ cls: "cobrain-bubble cobrain-bubble-ai" });
+  el.createDiv({ cls: "cobrain-who", text: "副脑" });
+  const body = el.createDiv();
+  const labelSpan = body.createSpan({ text: label });
+  const secSpan = body.createSpan({ text: " 0s", cls: "cobrain-timer" });
+  secSpan.setCssStyles({ opacity: "0.6", fontSize: "0.9em" });
+  const start = Date.now();
+  const timer = window.setInterval(() => {
+    secSpan.setText(" " + Math.floor((Date.now() - start) / 1000) + "s");
+  }, 1000);
+  parent.scrollTop = parent.scrollHeight;
+  return {
+    el,
+    stop: () => { window.clearInterval(timer); el.remove(); },
+  };
+}
+
+// 带秒数计时的 Notice：用于构思配图主题/扩写提示词/整理笔记等不在气泡里展示的等待。
+function timedNotice(label: string): { notice: Notice; stop: () => void } {
+  const start = Date.now();
+  const notice = new Notice(`${label} 0s`, 0);
+  const timer = window.setInterval(() => {
+    notice.setMessage(`${label} ${Math.floor((Date.now() - start) / 1000)}s`);
+  }, 1000);
+  return { notice, stop: () => { window.clearInterval(timer); notice.hide(); } };
+}
 
 // 把回调式 Modal 包成 Promise，便于在配图/存笔记里线性 await。关闭未提交 → resolve 空值。
 function askPrompt(app: App, title: string, initial: string): Promise<string | null> {
@@ -67,9 +123,14 @@ export class ChatView extends ItemView {
   private sources = new Set<string>();
   private lastMermaid: string | null = null;
   private lastImageEmbed: string | null = null;
+  private lastSavedNote: SavedNoteState | null = null;
   private messagesEl!: HTMLElement;
+  private welcomeEl!: HTMLElement;
+  private contextLimitEl!: HTMLElement;
   private inputEl!: HTMLTextAreaElement;
   private sendBtn!: HTMLButtonElement;
+  private actionButtons: HTMLButtonElement[] = [];
+  private saveNoteBtn!: HTMLButtonElement;
   private busy = false; // 一次只跑一轮 ask，避免连发导致 history 交错
   private pendingSourceContexts: string[] = []; // 引用带来的源笔记小节，只喂给紧接着的那一问
   private instanceId: number; // 实例 ID（1/2/3）
@@ -89,16 +150,28 @@ export class ChatView extends ItemView {
     root.addClass("cobrain-root");
 
     this.messagesEl = root.createDiv({ cls: "cobrain-messages" });
-    this.messagesEl.createDiv({
-      cls: "cobrain-welcome",
-      text: "聊你正在想的——我会翻出你写过的相关旧笔记摊到眼前，并回抛问题逼你自己想。下方：概念图 / 推敲 / 配图 / 存为笔记。",
-    });
+    this.renderWelcome();
+    this.contextLimitEl = this.messagesEl.createDiv({ cls: "cobrain-context-limit" });
+
+    const draft = this.plugin.getChatDraft(this.instanceId);
+    if (draft) {
+      this.history = [...draft.history];
+      this.sources = new Set(draft.sources);
+      this.lastMermaid = draft.lastMermaid;
+      this.lastImageEmbed = draft.lastImageEmbed;
+      this.lastSavedNote = draft.lastSavedNote;
+      this.messagesEl.createDiv({ cls: "cobrain-restored", text: "已恢复上次未关闭的对话草稿。" });
+      for (const msg of this.history) {
+        if (msg.role === "user" || msg.role === "assistant") this.addBubble(msg.role, msg.content);
+      }
+    }
 
     const bar = root.createDiv({ cls: "cobrain-bar" });
     this.makeBtn(bar, "概念图", () => void this.doConceptMap());
     this.makeBtn(bar, "推敲", () => void this.doCritique());
     this.makeBtn(bar, "配图", () => void this.doImage());
-    this.makeBtn(bar, "存为笔记", () => void this.doSaveNote());
+    this.saveNoteBtn = this.makeBtn(bar, "存为笔记", () => void this.doSaveNote());
+    this.makeBtn(bar, "清空", () => void this.doClearDraft());
 
     const iw = root.createDiv({ cls: "cobrain-inputrow" });
     this.inputEl = iw.createEl("textarea", {
@@ -115,6 +188,8 @@ export class ChatView extends ItemView {
       }
     });
     this.autoGrow();
+    this.updateContextLimitNotice();
+    this.updateActionButtons();
   }
 
   // 输入框随内容长高；上限与滚动由 CSS（.cobrain-input 的 max-height/overflow）封顶。
@@ -123,9 +198,77 @@ export class ChatView extends ItemView {
     this.inputEl.setCssStyles({ height: this.inputEl.scrollHeight + "px" });
   }
 
-  private makeBtn(parent: HTMLElement, text: string, fn: () => void): void {
+  private makeBtn(parent: HTMLElement, text: string, fn: () => void): HTMLButtonElement {
     const b = parent.createEl("button", { text });
     b.onclick = fn;
+    this.actionButtons.push(b);
+    return b;
+  }
+
+  private renderWelcome(): void {
+    this.welcomeEl = this.messagesEl.createDiv({
+      cls: "cobrain-welcome",
+      text: this.plugin.chatWelcomeText(),
+    });
+    void this.plugin.whenIndexReady().then(
+      () => this.welcomeEl.setText(this.plugin.chatWelcomeText()),
+      () => undefined,
+    );
+  }
+
+  private persistDraft(): void {
+    this.plugin.saveChatDraft(this.instanceId, {
+      history: this.history,
+      sources: [...this.sources],
+      lastMermaid: this.lastMermaid,
+      lastImageEmbed: this.lastImageEmbed,
+      lastSavedNote: this.lastSavedNote,
+    });
+  }
+
+  private updateActionButtons(): void {
+    const hasHistory = this.history.length > 0;
+    for (const b of this.actionButtons) b.disabled = this.busy || !hasHistory;
+    if (this.saveNoteBtn) {
+      this.saveNoteBtn.disabled = this.busy || !hasHistory;
+      this.saveNoteBtn.setText("存为笔记");
+    }
+  }
+
+  private updateContextLimitNotice(): void {
+    if (!this.contextLimitEl) return;
+    const text = chatContextLimitText(this.history.length);
+    if (text) {
+      this.contextLimitEl.setText(text);
+      this.contextLimitEl.style.display = "";
+    } else {
+      this.contextLimitEl.setText("");
+      this.contextLimitEl.style.display = "none";
+    }
+  }
+
+  private appendHistory(...msgs: ChatMsg[]): void {
+    this.history.push(...msgs);
+    this.updateContextLimitNotice();
+    this.updateActionButtons();
+    this.persistDraft();
+  }
+
+  private resetConversationUi(): void {
+    this.messagesEl.empty();
+    this.renderWelcome();
+    this.contextLimitEl = this.messagesEl.createDiv({ cls: "cobrain-context-limit" });
+    this.updateContextLimitNotice();
+    this.updateActionButtons();
+  }
+
+  private stateSignature(
+    history: ChatMsg[] = this.history,
+    sources: string[] = [...this.sources],
+    mermaid: string | null = this.lastMermaid,
+    imageEmbed: string | null = this.lastImageEmbed,
+  ): string {
+    return chatStateSignature(history, sources, mermaid, imageEmbed);
   }
 
   private addBubble(role: "user" | "assistant", text: string, sources?: string[]): HTMLElement {
@@ -291,12 +434,14 @@ export class ChatView extends ItemView {
     this.busy = true;
     this.inputEl.disabled = true;
     this.sendBtn.disabled = true;
+    this.updateActionButtons();
     return true;
   }
   private release(): void {
     this.busy = false;
     this.inputEl.disabled = false;
     this.sendBtn.disabled = false;
+    this.updateActionButtons();
   }
 
   // 把"引用"(来源链接 + 原文)预填进输入框；来源上下文暂存，喂给紧接着的那一问。
@@ -312,7 +457,13 @@ export class ChatView extends ItemView {
   private async send(): Promise<void> {
     const text = this.inputEl.value.trim();
     if (!text) return;
+    const configProblem = this.plugin.chatConfigProblem();
+    if (configProblem) {
+      new Notice(configProblem);
+      return;
+    }
     if (!this.acquire()) return;
+    const priorHistory = chatHistoryForModel(this.history);
     const sourceContext = this.pendingSourceContexts.length
       ? this.pendingSourceContexts.join("\n\n---\n\n")
       : undefined; // 消费一次：仅这一问带来源上下文
@@ -320,18 +471,20 @@ export class ChatView extends ItemView {
     this.inputEl.value = "";
     this.autoGrow();
     this.addBubble("user", text);
-    const thinking = this.addBubble("assistant", "思考中…");
+    this.appendHistory({ role: "user", content: text });
+    const thinking = thinkingBubble(this.messagesEl, "思考中…");
     try {
-      const { reply, sources, related } = await this.plugin.tutor.ask(this.history.slice(-20), text, sourceContext);
-      thinking.remove();
+      const { reply, sources, related } = await this.plugin.tutor.ask(priorHistory, text, sourceContext);
+      thinking.stop();
       // 先把你自己写过的相关旧笔记摊到眼前（第二大脑「联想」），再看导师的回应
       this.addRelatedBlock(related);
       this.addBubble("assistant", reply);
       sources.forEach(s => this.sources.add(s));
-      this.history.push({ role: "user", content: text }, { role: "assistant", content: reply });
+      this.appendHistory({ role: "assistant", content: reply });
     } catch (e) {
-      thinking.remove();
+      thinking.stop();
       this.addBubble("assistant", "出错了：" + errMsg(e));
+      this.persistDraft();
     } finally {
       this.release();
       this.inputEl.focus();
@@ -345,15 +498,16 @@ export class ChatView extends ItemView {
       return;
     }
     if (!this.acquire()) return;
-    const bubble = this.addBubble("assistant", "画概念图中…");
+    const bubble = thinkingBubble(this.messagesEl, "画概念图中…");
     try {
       const raw = await this.plugin.tutor.conceptMap(t);
       this.lastMermaid = extractMermaid(raw);
-      bubble.remove();
+      bubble.stop();
       this.addBubble("assistant", this.lastMermaid ?? "（未能生成有效的概念图）\n\n" + raw);
+      this.persistDraft();
     } catch (e) {
       this.lastMermaid = null; // 失败不保留上一个话题的旧图，避免存笔记时把陈旧图串进去
-      bubble.remove();
+      bubble.stop();
       this.addBubble("assistant", "概念图失败：" + errMsg(e));
     } finally {
       this.release();
@@ -366,14 +520,14 @@ export class ChatView extends ItemView {
       return;
     }
     if (!this.acquire()) return;
-    const bubble = this.addBubble("assistant", "推敲中…");
+    const bubble = thinkingBubble(this.messagesEl, "推敲中…");
     try {
       const reply = await this.plugin.tutor.critique(this.history);
-      bubble.remove();
+      bubble.stop();
       this.addBubble("assistant", reply);
-      this.history.push({ role: "assistant", content: reply });
+      this.appendHistory({ role: "assistant", content: reply });
     } catch (e) {
-      bubble.remove();
+      bubble.stop();
       this.addBubble("assistant", "推敲失败：" + errMsg(e));
     } finally {
       this.release();
@@ -386,13 +540,13 @@ export class ChatView extends ItemView {
     let seed = this.currentTopic();
     if (this.history.length) {
       if (!this.acquire()) return;
-      const notice = new Notice("构思配图主题中…", 0);
+      const t = timedNotice("构思配图主题中…");
       try {
         seed = await this.plugin.tutor.imageConcept(this.history);
       } catch {
         // 提炼失败：回退到最近发言，不打断配图
       } finally {
-        notice.hide();
+        t.stop();
         this.release();
       }
     }
@@ -406,14 +560,14 @@ export class ChatView extends ItemView {
   private async runImageFromConcept(concept: string): Promise<string | null> {
     if (!this.acquire()) return null;
     let scene: string;
-    const notice = new Notice("扩写配图提示词中…", 0);
+    const t = timedNotice("扩写配图提示词中…");
     try {
       scene = await this.plugin.tutor.imagePrompt(concept);
     } catch (e) {
       new Notice("提示词扩写失败：" + errMsg(e));
       return null;
     } finally {
-      notice.hide();
+      t.stop();
       this.release(); // 扩写完即释放：用户编辑提示词期间不该锁住对话面板
     }
     const style = this.plugin.settings.imageStyle;
@@ -423,16 +577,17 @@ export class ChatView extends ItemView {
     const finalPrompt = await askTextArea(this.app, "确认 / 编辑配图提示词", fullPrompt);
     if (!finalPrompt) return null;
     if (!this.acquire()) return null;
-    const bubble = this.addBubble("assistant", `为「${concept}」配图中…（图像生成较慢，约 1 分钟，请稍候）`);
+    const bubble = thinkingBubble(this.messagesEl, `为「${concept}」配图中…（图像生成较慢，约 1 分钟）`);
     try {
       const buf = await this.plugin.image.generate(finalPrompt);
       const path = await saveImage(this.app, this.plugin.settings, buf);
       this.lastImageEmbed = `![[${path}]]`;
-      bubble.remove();
+      bubble.stop();
       this.addBubble("assistant", `「${concept}」配图：\n\n${this.lastImageEmbed}`);
+      this.persistDraft();
       return this.lastImageEmbed;
     } catch (e) {
-      bubble.remove();
+      bubble.stop();
       this.addBubble("assistant", "配图失败：" + errMsg(e));
       return null;
     } finally {
@@ -445,18 +600,31 @@ export class ChatView extends ItemView {
       new Notice("还没有对话可保存");
       return;
     }
+    const currentSignature = this.stateSignature();
+    if (this.lastSavedNote?.stateSignature === currentSignature) {
+      new Notice(`这段对话和当前产物已保存过：${this.lastSavedNote.path}`);
+      return;
+    }
+    if (this.lastSavedNote) new Notice("对话或产物已变化，将保存新版本");
+
+    // 先冻结本次保存要用的材料。弹窗期间用户继续聊天，也不会悄悄混进这篇笔记。
+    const historySnapshot = this.history.map(m => ({ ...m }));
+    const sourcesSnapshot = [...this.sources].sort();
+    const mermaidSnapshot = this.lastMermaid;
+    let imageSnapshot = this.lastImageEmbed;
+
     if (!this.acquire()) return;
     let title = "", body = "";
-    const notice = new Notice("整理成笔记中…", 0);
+    const t = timedNotice("整理成笔记中…");
     try {
-      ({ title, body } = await this.plugin.tutor.summarizeNote(this.history));
+      ({ title, body } = await this.plugin.tutor.summarizeNote(historySnapshot));
     } catch (e) {
       new Notice("整理失败：" + errMsg(e));
-      notice.hide();
+      t.stop();
       this.release();
       return;
     }
-    notice.hide();
+    t.stop();
     this.release(); // 下面要弹选项框、可能还要长时出图，期间不锁面板
 
     // 保存选项：附提问（默认随全局设置）+ 配图（默认关，即使本轮已配过图也要问）。取消则中止。
@@ -465,33 +633,61 @@ export class ChatView extends ItemView {
       hasImage: false, // 始终显示配图复选框，不自动带入
     });
     if (!opts) return; // 取消，不落盘
-    if (opts.image && !this.lastImageEmbed) await this.runImageFromConcept(title); // 自行管理 acquire/release
+    if (opts.image && !imageSnapshot) {
+      imageSnapshot = await this.runImageFromConcept(title); // 自行管理 acquire/release
+    }
 
     // 落盘
     if (!this.acquire()) return;
     try {
       // 只附用户的提问（原始问题），不含 AI 回答
       const conversation = opts.append
-        ? this.history.filter(m => m.role === "user").map(m => `**你**：${m.content}`).join("\n\n")
+        ? historySnapshot.filter(m => m.role === "user").map(m => `**你**：${m.content}`).join("\n\n")
         : null;
       const path = await saveNote(this.app, this.plugin.settings, {
         title,
         body,
-        sources: [...this.sources],
-        mermaid: this.lastMermaid,
-        imageEmbed: opts.image ? this.lastImageEmbed : null, // 只有勾选才加配图
+        sources: sourcesSnapshot,
+        mermaid: mermaidSnapshot,
+        imageEmbed: opts.image ? imageSnapshot : null, // 只有勾选才加配图
         conversation,
       });
       new Notice("已保存：" + path);
-      // 每篇笔记消费掉本轮累积的产物与来源，避免渗进下一篇（旧概念图/配图/来源串台）
-      this.lastMermaid = null;
-      this.lastImageEmbed = null;
-      this.sources.clear();
+      // 只消费本次快照用掉的产物。保存弹窗期间若用户继续聊天或重新生成产物，不把新状态误清掉。
+      if (this.lastMermaid === mermaidSnapshot) this.lastMermaid = null;
+      if (this.lastImageEmbed === imageSnapshot) this.lastImageEmbed = null;
+      for (const s of sourcesSnapshot) this.sources.delete(s);
+      this.lastSavedNote = {
+        stateSignature: this.stateSignature(historySnapshot, [], null, null),
+        path,
+        savedAt: Date.now(),
+      };
+      this.persistDraft();
     } catch (e) {
       new Notice("保存失败：" + errMsg(e));
     } finally {
       this.release();
     }
+  }
+
+  private async doClearDraft(): Promise<void> {
+    if (!this.history.length) {
+      new Notice("当前没有对话草稿");
+      return;
+    }
+    const confirmed = await askConfirm(this.app, "清空当前对话", "会删除这个面板的消息和草稿，不会删除已经保存的笔记。");
+    if (!confirmed) return;
+    this.history = [];
+    this.sources.clear();
+    this.lastMermaid = null;
+    this.lastImageEmbed = null;
+    this.lastSavedNote = null;
+    this.pendingSourceContexts = [];
+    this.inputEl.value = "";
+    this.autoGrow();
+    this.plugin.clearChatDraft(this.instanceId);
+    this.resetConversationUi();
+    new Notice("当前对话已清空");
   }
 
   async onClose(): Promise<void> {

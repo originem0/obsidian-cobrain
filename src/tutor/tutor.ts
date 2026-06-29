@@ -68,6 +68,9 @@ export class Tutor {
   constructor(private retriever: Retriever, private chat: ChatClient, private settings: CobrainSettings) {}
 
   private async retrieveContext(query: string): Promise<{ context: string; sources: string[]; hits: QueryHit[] }> {
+    if (!this.settings.embedBaseUrl || !this.settings.embedKey || !this.settings.embedModel) {
+      return { context: "", sources: [], hits: [] };
+    }
     try {
       // 检索 8 篇不同笔记给人看，但只取前 6 篇喂模型：
       // 人需要更宽的相关材料面（漏掉的好笔记自己点开），模型则要聚焦、省 token。

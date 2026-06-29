@@ -133,4 +133,5 @@ export class VectorStore {
   }
 
   allPaths(): string[] { return Object.keys(this.mtimes); }
+  entryCount(): number { return this.entries.length; }
 }

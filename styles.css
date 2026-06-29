@@ -5,6 +5,17 @@
    这里显式放开消息区，让用户能选中副脑回复 / 自己的提问并 Ctrl+C 复制。 */
 .cobrain-messages, .cobrain-messages * { -webkit-user-select: text; user-select: text; }
 .cobrain-welcome { color: var(--text-muted); padding: 6px 4px 10px; font-size: 0.88em; line-height: 1.5; }
+.cobrain-restored, .cobrain-context-limit {
+  color: var(--text-muted);
+  background: var(--background-secondary);
+  border-left: 2px solid var(--interactive-accent);
+  border-radius: 4px;
+  padding: 6px 8px;
+  margin: 6px 0;
+  font-size: 0.82em;
+  line-height: 1.45;
+}
+.cobrain-context-limit { border-left-color: var(--text-warning); }
 .cobrain-bar { display: flex; gap: 6px; padding: 6px 10px; flex-wrap: wrap; border-top: 1px solid var(--background-modifier-border); }
 .cobrain-bar button { font-size: 0.82em; padding: 2px 10px; }
 .cobrain-inputrow { display: flex; gap: 6px; padding: 8px 10px; border-top: 1px solid var(--background-modifier-border); align-items: flex-end; }
