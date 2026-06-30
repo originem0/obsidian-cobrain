@@ -1,6 +1,7 @@
 import { requestUrl } from "obsidian";
 import { withTimeout } from "../util/withTimeout";
 import { classifyModels } from "./modelClassifier";
+import { parseChatResponse } from "./chatClient";
 export { classifyModels } from "./modelClassifier";
 
 const PROBE_TIMEOUT_MS = 30_000;
@@ -55,7 +56,15 @@ export async function testChat(
       "聊天测试",
     );
     const ms = Date.now() - started;
-    if (res.status === 200) return { ok: true, ms };
+    if (res.status === 200) {
+      // 不只看 200：推理模型在 max_tokens:1 下会 200 但 content 为空，借 parseChatResponse 验真有内容
+      try {
+        parseChatResponse(res.json);
+        return { ok: true, ms };
+      } catch (e) {
+        return { ok: false, ms, error: e instanceof Error ? e.message : String(e) };
+      }
+    }
     return { ok: false, ms, error: `HTTP ${res.status} ${(res.text || "").slice(0, 200)}` };
   } catch (e) {
     return { ok: false, ms: Date.now() - started, error: e instanceof Error ? e.message : String(e) };

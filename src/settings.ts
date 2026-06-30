@@ -115,7 +115,7 @@ export const DEFAULT_SETTINGS: CobrainSettings = {
   noteFolder: "cobrain-note",
   attachmentFolder: "cobrain-note/附件",
   indexExcludeFolders: DEFAULT_INDEX_EXCLUDE_FOLDERS,
-  retrievalMinScore: 0.2,
+  retrievalMinScore: 0.3,
   noteTags: "cobrain-note",
   appendConversation: false,
   conceptMapDirection: "TD",

@@ -1,4 +1,4 @@
-import { ItemView, WorkspaceLeaf, MarkdownRenderer, Notice, Modal, App, TFile, Menu, normalizePath } from "obsidian";
+import { ItemView, WorkspaceLeaf, MarkdownRenderer, Notice, TFile, Menu, normalizePath } from "obsidian";
 import type { ChatMsg } from "../llm/chatClient";
 import type { QueryHit } from "../rag/vectorStore";
 import { saveNote, saveImage } from "../noteWriter";
@@ -6,11 +6,15 @@ import { extractMermaid } from "../util/mermaid";
 import { fnv1a } from "../util/hash";
 import type CobrainPlugin from "../main";
 import type { SavedNoteState } from "../main";
+import { askPrompt, askTextArea, askConfirm, askSaveOptions } from "./modals";
 
 export const VIEW_TYPE_COBRAIN_CHAT = "cobrain-chat";
 
 const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e));
 const CHAT_CONTEXT_MSG_LIMIT = 20;
+
+// 用户点「停止」时用它拒绝在途请求：与真实错误区分，停止不显示报错气泡。
+class CancelledError extends Error { constructor() { super("已停止"); } }
 
 export function chatStateSignature(
   history: ChatMsg[],
@@ -65,52 +69,7 @@ function timedNotice(label: string): { notice: Notice; stop: () => void } {
   return { notice, stop: () => { window.clearInterval(timer); notice.hide(); } };
 }
 
-// 把回调式 Modal 包成 Promise，便于在配图/存笔记里线性 await。关闭未提交 → resolve 空值。
-function askPrompt(app: App, title: string, initial: string): Promise<string | null> {
-  return new Promise(resolve => {
-    let done = false;
-    const finish = (v: string | null) => { if (!done) { done = true; resolve(v); } };
-    const m = new PromptModal(app, title, initial, v => finish(v || null));
-    const close = m.onClose.bind(m);
-    m.onClose = () => { close(); finish(null); };
-    m.open();
-  });
-}
-function askTextArea(app: App, title: string, initial: string): Promise<string | null> {
-  return new Promise(resolve => {
-    let done = false;
-    const finish = (v: string | null) => { if (!done) { done = true; resolve(v); } };
-    const m = new TextAreaModal(app, title, initial, v => finish(v || null));
-    const close = m.onClose.bind(m);
-    m.onClose = () => { close(); finish(null); };
-    m.open();
-  });
-}
-function askSaveOptions(
-  app: App,
-  title: string,
-  defaults: { append: boolean; hasImage: boolean },
-): Promise<{ append: boolean; image: boolean } | null> {
-  return new Promise(resolve => {
-    let done = false;
-    const finish = (v: { append: boolean; image: boolean } | null) => { if (!done) { done = true; resolve(v); } };
-    const m = new SaveOptionsModal(app, title, defaults, finish);
-    const close = m.onClose.bind(m);
-    m.onClose = () => { close(); finish(null); }; // 关闭未点保存 = 取消
-    m.open();
-  });
-}
-
-function askConfirm(app: App, title: string, message: string): Promise<boolean> {
-  return new Promise(resolve => {
-    let done = false;
-    const finish = (v: boolean) => { if (!done) { done = true; resolve(v); } };
-    const m = new ConfirmModal(app, title, message, finish);
-    const close = m.onClose.bind(m);
-    m.onClose = () => { close(); finish(false); };
-    m.open();
-  });
-}
+// 把回调式 Modal 包成 Promise 的 askPrompt/askTextArea/askConfirm/askSaveOptions 及其弹窗类已抽到 ./modals。
 
 function isUnderFolder(path: string, folder: string): boolean {
   const p = normalizePath(path);
@@ -132,6 +91,7 @@ export class ChatView extends ItemView {
   private actionButtons: HTMLButtonElement[] = [];
   private saveNoteBtn!: HTMLButtonElement;
   private busy = false; // 一次只跑一轮 ask，避免连发导致 history 交错
+  private currentCancel: (() => void) | null = null; // 「停止」按钮：拒绝当前在途请求
   private pendingSourceContexts: string[] = []; // 引用带来的源笔记小节，只喂给紧接着的那一问
   private instanceId: number; // 实例 ID（1/2/3）
 
@@ -277,118 +237,7 @@ export class ChatView extends ItemView {
     const body = b.createDiv();
 
     if (role === "assistant") {
-      void MarkdownRenderer.render(this.app, text, body, "", this);
-
-      // 检测 Mermaid 代码块 → 点击图表切换显示代码
-      const mermaidMatch = text.match(/```mermaid\n([\s\S]*?)```/);
-      if (mermaidMatch) {
-        const code = mermaidMatch[1].trim();
-        // 等待渲染完成后添加点击切换逻辑
-        window.setTimeout(() => {
-          // 找到渲染容器：尝试多种可能的选择器
-          const container = body.querySelector("pre.language-mermaid") || body.querySelector(".block-language-mermaid") || body.querySelector("[class*='mermaid']");
-          if (!container || !(container instanceof HTMLElement)) return;
-
-          let showingCode = false;
-          const rendered = container.cloneNode(true) as HTMLElement; // 保存渲染视图
-
-          container.addClass("cobrain-mermaid-toggle");
-          container.setAttribute("title", "点击查看代码");
-          container.onclick = (e: MouseEvent) => {
-            e.stopPropagation();
-            if (showingCode) {
-              // 切回图表
-              container.empty();
-              container.appendChild(rendered.cloneNode(true));
-              container.setAttribute("title", "点击查看代码");
-              showingCode = false;
-            } else {
-              // 切换成代码
-              container.empty();
-              const pre = container.createEl("pre", { cls: "cobrain-mermaid-code" });
-              pre.createEl("code", { text: code });
-              container.setAttribute("title", "点击返回图表");
-              showingCode = true;
-            }
-          };
-        }, 150);
-      }
-
-      // 检测图片嵌入 ![[...]] → 缩略图 + 单击查看大图 + 右键菜单
-      const imageMatch = text.match(/!\[\[([^\]]+)\]\]/);
-      if (imageMatch) {
-        const imagePath = imageMatch[1];
-        window.setTimeout(() => {
-          // 找到渲染出的图片元素
-          const imgEl = body.querySelector("img[src*='" + imagePath.split('/').pop()?.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + "']");
-          if (!imgEl || !(imgEl instanceof HTMLImageElement)) return;
-
-          // 缩略图样式
-          imgEl.addClass("cobrain-image-thumb");
-          imgEl.setAttribute("title", "单击查看大图");
-
-          // 单击查看大图
-          imgEl.onclick = (e: MouseEvent) => {
-            e.stopPropagation();
-            const file = this.app.vault.getAbstractFileByPath(imagePath);
-            if (file instanceof TFile) {
-              // 使用 Obsidian 内置的图片查看器
-              this.app.workspace.getLeaf(false).openFile(file);
-            }
-          };
-
-          // 右键菜单
-          imgEl.addEventListener("contextmenu", (e: MouseEvent) => {
-            e.preventDefault();
-            e.stopPropagation();
-            const menu = new Menu();
-
-            menu.addItem(item => {
-              item.setTitle("单独保存配图")
-                .setIcon("download")
-                .onClick(async () => {
-                  const file = this.app.vault.getAbstractFileByPath(imagePath);
-                  if (file instanceof TFile) {
-                    try {
-                      const content = await this.app.vault.readBinary(file);
-                      const newPath = await saveImage(this.app, this.plugin.settings, content);
-                      new Notice(`配图已另存为：${newPath}`);
-                    } catch (err) {
-                      new Notice("保存失败：" + (err instanceof Error ? err.message : String(err)));
-                    }
-                  }
-                });
-            });
-
-            menu.addItem(item => {
-              item.setTitle("删除配图")
-                .setIcon("trash")
-                .onClick(async () => {
-                  const file = this.app.vault.getAbstractFileByPath(imagePath);
-                  if (file instanceof TFile) {
-                    const folder = this.plugin.settings.attachmentFolder || "cobrain-note/附件";
-                    if (!isUnderFolder(file.path, folder)) {
-                      new Notice("只能删除附件目录内的 Cobrain 配图");
-                      return;
-                    }
-                    const confirmed = await askConfirm(this.app, "删除配图", `确定删除 ${file.path}？`);
-                    if (!confirmed) return;
-                    try {
-                      await this.app.vault.delete(file);
-                      new Notice("配图已删除");
-                      // 移除图片元素
-                      imgEl.remove();
-                    } catch (err) {
-                      new Notice("删除失败：" + (err instanceof Error ? err.message : String(err)));
-                    }
-                  }
-                });
-            });
-
-            menu.showAtMouseEvent(e);
-          });
-        }, 150);
-      }
+      void this.renderAssistant(body, text);
     } else {
       body.setText(text);
     }
@@ -398,6 +247,126 @@ export class ChatView extends ItemView {
     }
     this.messagesEl.scrollTop = this.messagesEl.scrollHeight;
     return b;
+  }
+
+  // 渲染助手消息：先 await Markdown 渲染，再挂 Mermaid 切换 / 配图交互。
+  // 旧实现用固定 150ms setTimeout 猜渲染完成，慢渲染下会静默失效；改为 await + 等元素真正出现。
+  private async renderAssistant(body: HTMLElement, text: string): Promise<void> {
+    await MarkdownRenderer.render(this.app, text, body, "", this);
+    const mermaidMatch = text.match(/```mermaid\n([\s\S]*?)```/);
+    if (mermaidMatch) await this.enhanceMermaid(body, mermaidMatch[1].trim());
+    const imageMatch = text.match(/!\[\[([^\]]+)\]\]/);
+    if (imageMatch) await this.enhanceImage(body, imageMatch[1]);
+  }
+
+  // 等 root 内出现匹配 selector 的元素（应对 Obsidian/Mermaid 的异步渲染），最多等 timeoutMs。
+  private waitForElement(root: HTMLElement, selector: string, timeoutMs = 2000): Promise<HTMLElement | null> {
+    const found = (): HTMLElement | null => {
+      const el = root.querySelector(selector);
+      return el instanceof HTMLElement ? el : null;
+    };
+    const existing = found();
+    if (existing) return Promise.resolve(existing);
+    return new Promise(resolve => {
+      let done = false;
+      const finish = (el: HTMLElement | null) => {
+        if (done) return;
+        done = true;
+        obs.disconnect();
+        window.clearTimeout(timer);
+        resolve(el);
+      };
+      const obs = new MutationObserver(() => {
+        const el = found();
+        if (el) finish(el);
+      });
+      obs.observe(root, { childList: true, subtree: true });
+      const timer = window.setTimeout(() => finish(found()), timeoutMs);
+    });
+  }
+
+  // 点击 Mermaid 图 ↔ 查看其源码。
+  private async enhanceMermaid(body: HTMLElement, code: string): Promise<void> {
+    const container = await this.waitForElement(body, "pre.language-mermaid, .block-language-mermaid, [class*='mermaid']");
+    if (!container) return;
+    let showingCode = false;
+    const rendered = container.cloneNode(true) as HTMLElement; // 保存渲染视图
+    container.addClass("cobrain-mermaid-toggle");
+    container.setAttribute("title", "点击查看代码");
+    container.onclick = (e: MouseEvent) => {
+      e.stopPropagation();
+      if (showingCode) {
+        container.empty();
+        container.appendChild(rendered.cloneNode(true));
+        container.setAttribute("title", "点击查看代码");
+        showingCode = false;
+      } else {
+        container.empty();
+        const pre = container.createEl("pre", { cls: "cobrain-mermaid-code" });
+        pre.createEl("code", { text: code });
+        container.setAttribute("title", "点击返回图表");
+        showingCode = true;
+      }
+    };
+  }
+
+  // 配图缩略图 + 单击查看大图 + 右键菜单（另存 / 删除）。
+  private async enhanceImage(body: HTMLElement, imagePath: string): Promise<void> {
+    const base = imagePath.split("/").pop() ?? imagePath;
+    // 等任意 img 渲染出来，再按 src 里的文件名匹配目标图（避免拼 CSS 选择器的转义问题）
+    await this.waitForElement(body, "img");
+    const imgEl = Array.from(body.querySelectorAll("img")).find(im => {
+      const src = im.getAttribute("src") || "";
+      try { return decodeURIComponent(src).includes(base); } catch { return src.includes(base); }
+    });
+    if (!(imgEl instanceof HTMLImageElement)) return;
+
+    imgEl.addClass("cobrain-image-thumb");
+    imgEl.setAttribute("title", "单击查看大图");
+    imgEl.onclick = (e: MouseEvent) => {
+      e.stopPropagation();
+      const file = this.app.vault.getAbstractFileByPath(imagePath);
+      if (file instanceof TFile) this.app.workspace.getLeaf(false).openFile(file);
+    };
+    imgEl.addEventListener("contextmenu", (e: MouseEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const menu = new Menu();
+      menu.addItem(item =>
+        item.setTitle("单独保存配图").setIcon("download").onClick(async () => {
+          const file = this.app.vault.getAbstractFileByPath(imagePath);
+          if (!(file instanceof TFile)) return;
+          try {
+            const content = await this.app.vault.readBinary(file);
+            const newPath = await saveImage(this.app, this.plugin.settings, content);
+            new Notice(`配图已另存为：${newPath}`);
+          } catch (err) {
+            new Notice("保存失败：" + errMsg(err));
+          }
+        }),
+      );
+      menu.addItem(item =>
+        item.setTitle("删除配图").setIcon("trash").onClick(async () => {
+          const file = this.app.vault.getAbstractFileByPath(imagePath);
+          if (!(file instanceof TFile)) return;
+          const folder = this.plugin.settings.attachmentFolder || "cobrain-note/附件";
+          if (!isUnderFolder(file.path, folder)) {
+            new Notice("只能删除附件目录内的 Cobrain 配图");
+            return;
+          }
+          const confirmed = await askConfirm(this.app, "删除配图", `确定删除 ${file.path}？`);
+          if (!confirmed) return;
+          try {
+            await this.app.vault.delete(file);
+            new Notice("配图已删除");
+            imgEl.remove();
+          } catch (err) {
+            new Notice("删除失败：" + errMsg(err));
+          }
+        }),
+      );
+      menu.showAtMouseEvent(e);
+    });
   }
 
   // 把检索命中的旧笔记显式列出来、可点开，让第二大脑的联想发生在用户眼前。
@@ -428,20 +397,41 @@ export class ChatView extends ItemView {
     return "";
   }
 
-  // 占用面板：busy 期间禁用输入/发送，并让 send 与三个按钮（及彼此）互斥，避免并发请求把对话/产物交错。
+  // 占用面板：busy 期间禁用输入，发送键变「停止」（可取消在途请求），三个按钮互斥避免并发交错。
   private acquire(): boolean {
     if (this.busy) { new Notice("正在处理上一个请求，请稍候…"); return false; }
     this.busy = true;
     this.inputEl.disabled = true;
-    this.sendBtn.disabled = true;
+    // 发送键转为「停止」：requestUrl 无法真正中止，停止只解锁 UI、放弃结果（底层请求仍会在后台跑完）
+    this.sendBtn.disabled = false;
+    this.sendBtn.setText("停止");
+    this.sendBtn.onclick = () => this.cancelCurrent();
     this.updateActionButtons();
     return true;
   }
   private release(): void {
     this.busy = false;
+    this.currentCancel = null;
     this.inputEl.disabled = false;
     this.sendBtn.disabled = false;
+    this.sendBtn.setText("发送");
+    this.sendBtn.onclick = () => void this.send();
     this.updateActionButtons();
+  }
+
+  // 点「停止」：拒绝在途请求（runCancellable 的竞速），等待中的处理流程抛 CancelledError 并解锁。
+  private cancelCurrent(): void {
+    if (!this.currentCancel) return;
+    this.currentCancel();
+    new Notice("已停止（请求可能仍在后台完成）");
+  }
+
+  // 把一次网络等待包成可取消：与 cancel 竞速。点「停止」即 reject，UI 立即解锁；底层 requestUrl 仍会跑完。
+  private runCancellable<T>(p: Promise<T>): Promise<T> {
+    let rejectCancel: (e: Error) => void;
+    const cancel = new Promise<never>((_, reject) => { rejectCancel = reject; });
+    this.currentCancel = () => rejectCancel(new CancelledError());
+    return Promise.race([p, cancel]).finally(() => { this.currentCancel = null; });
   }
 
   // 把"引用"(来源链接 + 原文)预填进输入框；来源上下文暂存，喂给紧接着的那一问。
@@ -474,7 +464,7 @@ export class ChatView extends ItemView {
     this.appendHistory({ role: "user", content: text });
     const thinking = thinkingBubble(this.messagesEl, "思考中…");
     try {
-      const { reply, sources, related } = await this.plugin.tutor.ask(priorHistory, text, sourceContext);
+      const { reply, sources, related } = await this.runCancellable(this.plugin.tutor.ask(priorHistory, text, sourceContext));
       thinking.stop();
       // 先把你自己写过的相关旧笔记摊到眼前（第二大脑「联想」），再看导师的回应
       this.addRelatedBlock(related);
@@ -483,8 +473,10 @@ export class ChatView extends ItemView {
       this.appendHistory({ role: "assistant", content: reply });
     } catch (e) {
       thinking.stop();
-      this.addBubble("assistant", "出错了：" + errMsg(e));
-      this.persistDraft();
+      if (!(e instanceof CancelledError)) {
+        this.addBubble("assistant", "出错了：" + errMsg(e));
+        this.persistDraft();
+      }
     } finally {
       this.release();
       this.inputEl.focus();
@@ -492,15 +484,14 @@ export class ChatView extends ItemView {
   }
 
   private async doConceptMap(): Promise<void> {
-    const t = this.currentTopic();
-    if (!t) {
+    if (!this.history.length) {
       new Notice("先聊点什么，再画概念图");
       return;
     }
     if (!this.acquire()) return;
     const bubble = thinkingBubble(this.messagesEl, "画概念图中…");
     try {
-      const raw = await this.plugin.tutor.conceptMap(t);
+      const raw = await this.runCancellable(this.plugin.tutor.conceptMap(this.history));
       this.lastMermaid = extractMermaid(raw);
       bubble.stop();
       this.addBubble("assistant", this.lastMermaid ?? "（未能生成有效的概念图）\n\n" + raw);
@@ -508,7 +499,7 @@ export class ChatView extends ItemView {
     } catch (e) {
       this.lastMermaid = null; // 失败不保留上一个话题的旧图，避免存笔记时把陈旧图串进去
       bubble.stop();
-      this.addBubble("assistant", "概念图失败：" + errMsg(e));
+      if (!(e instanceof CancelledError)) this.addBubble("assistant", "概念图失败：" + errMsg(e));
     } finally {
       this.release();
     }
@@ -522,13 +513,13 @@ export class ChatView extends ItemView {
     if (!this.acquire()) return;
     const bubble = thinkingBubble(this.messagesEl, "推敲中…");
     try {
-      const reply = await this.plugin.tutor.critique(this.history);
+      const reply = await this.runCancellable(this.plugin.tutor.critique(this.history));
       bubble.stop();
       this.addBubble("assistant", reply);
       this.appendHistory({ role: "assistant", content: reply });
     } catch (e) {
       bubble.stop();
-      this.addBubble("assistant", "推敲失败：" + errMsg(e));
+      if (!(e instanceof CancelledError)) this.addBubble("assistant", "推敲失败：" + errMsg(e));
     } finally {
       this.release();
     }
@@ -541,14 +532,17 @@ export class ChatView extends ItemView {
     if (this.history.length) {
       if (!this.acquire()) return;
       const t = timedNotice("构思配图主题中…");
+      let cancelled = false;
       try {
-        seed = await this.plugin.tutor.imageConcept(this.history);
-      } catch {
-        // 提炼失败：回退到最近发言，不打断配图
+        seed = await this.runCancellable(this.plugin.tutor.imageConcept(this.history));
+      } catch (e) {
+        if (e instanceof CancelledError) cancelled = true;
+        // 其它失败：回退到最近发言，不打断配图
       } finally {
         t.stop();
         this.release();
       }
+      if (cancelled) return; // 停止：中止整个配图流程
     }
     if (!seed) { new Notice("先聊点什么，再配图"); return; }
     const concept = await askPrompt(this.app, "给哪个概念配图？", seed);
@@ -562,9 +556,9 @@ export class ChatView extends ItemView {
     let scene: string;
     const t = timedNotice("扩写配图提示词中…");
     try {
-      scene = await this.plugin.tutor.imagePrompt(concept);
+      scene = await this.runCancellable(this.plugin.tutor.imagePrompt(concept));
     } catch (e) {
-      new Notice("提示词扩写失败：" + errMsg(e));
+      if (!(e instanceof CancelledError)) new Notice("提示词扩写失败：" + errMsg(e));
       return null;
     } finally {
       t.stop();
@@ -579,7 +573,7 @@ export class ChatView extends ItemView {
     if (!this.acquire()) return null;
     const bubble = thinkingBubble(this.messagesEl, `为「${concept}」配图中…（图像生成较慢，约 1 分钟）`);
     try {
-      const buf = await this.plugin.image.generate(finalPrompt);
+      const buf = await this.runCancellable(this.plugin.image.generate(finalPrompt));
       const path = await saveImage(this.app, this.plugin.settings, buf);
       this.lastImageEmbed = `![[${path}]]`;
       bubble.stop();
@@ -588,7 +582,7 @@ export class ChatView extends ItemView {
       return this.lastImageEmbed;
     } catch (e) {
       bubble.stop();
-      this.addBubble("assistant", "配图失败：" + errMsg(e));
+      if (!(e instanceof CancelledError)) this.addBubble("assistant", "配图失败：" + errMsg(e));
       return null;
     } finally {
       this.release();
@@ -617,9 +611,9 @@ export class ChatView extends ItemView {
     let title = "", body = "";
     const t = timedNotice("整理成笔记中…");
     try {
-      ({ title, body } = await this.plugin.tutor.summarizeNote(historySnapshot));
+      ({ title, body } = await this.runCancellable(this.plugin.tutor.summarizeNote(historySnapshot)));
     } catch (e) {
-      new Notice("整理失败：" + errMsg(e));
+      if (!(e instanceof CancelledError)) new Notice("整理失败：" + errMsg(e));
       t.stop();
       this.release();
       return;
@@ -657,6 +651,9 @@ export class ChatView extends ItemView {
       if (this.lastMermaid === mermaidSnapshot) this.lastMermaid = null;
       if (this.lastImageEmbed === imageSnapshot) this.lastImageEmbed = null;
       for (const s of sourcesSnapshot) this.sources.delete(s);
+      // 不变量：这里记录的是「保存后状态」的签名——上面刚把用到的 sources/mermaid/image 都清空了，
+      // 所以紧接着不改动再点「存为笔记」时，顶部 stateSignature() 算出的当前状态与此处一致，命中去重。
+      // 若改了这套清空逻辑，务必同步这里的签名口径，否则去重会失效或误判。
       this.lastSavedNote = {
         stateSignature: this.stateSignature(historySnapshot, [], null, null),
         path,
@@ -691,136 +688,10 @@ export class ChatView extends ItemView {
   }
 
   async onClose(): Promise<void> {
+    // 关闭即把当前草稿落盘：saveChatDraft 走防抖，关闭时强制冲一次，避免丢最后改动
+    this.plugin.flushDrafts();
     this.contentEl.empty();
     // 释放实例 ID，允许再次使用这个槽位
     this.plugin.releaseViewId(this.instanceId);
-  }
-}
-
-class PromptModal extends Modal {
-  constructor(
-    app: App,
-    private titleText: string,
-    private initial: string,
-    private onSubmit: (v: string) => void,
-  ) {
-    super(app);
-  }
-  onOpen(): void {
-    this.contentEl.createEl("h3", { text: this.titleText });
-    const input = this.contentEl.createEl("input", { type: "text", value: this.initial });
-    input.setCssStyles({ width: "100%" });
-    input.focus();
-    input.select();
-    const submit = () => {
-      this.onSubmit(input.value.trim());
-      this.close();
-    };
-    input.addEventListener("keydown", e => {
-      if (e.key === "Enter") submit();
-    });
-    const btn = this.contentEl.createEl("button", { text: "确定" });
-    btn.setCssStyles({ marginTop: "8px" });
-    btn.onclick = submit;
-  }
-  onClose(): void {
-    this.contentEl.empty();
-  }
-}
-
-// 多行可编辑弹窗：用于出图前确认 / 编辑配图提示词
-class TextAreaModal extends Modal {
-  constructor(
-    app: App,
-    private titleText: string,
-    private initial: string,
-    private onSubmit: (v: string) => void,
-  ) {
-    super(app);
-  }
-  onOpen(): void {
-    this.contentEl.createEl("h3", { text: this.titleText });
-    const ta = this.contentEl.createEl("textarea");
-    ta.value = this.initial;
-    ta.setCssStyles({ width: "100%", height: "160px", resize: "vertical" });
-    ta.focus();
-    const btn = this.contentEl.createEl("button", { text: "生成" });
-    btn.setCssStyles({ marginTop: "8px" });
-    btn.onclick = () => {
-      this.onSubmit(ta.value.trim());
-      this.close();
-    };
-  }
-  onClose(): void {
-    this.contentEl.empty();
-  }
-}
-
-class ConfirmModal extends Modal {
-  constructor(
-    app: App,
-    private titleText: string,
-    private message: string,
-    private onPick: (v: boolean) => void,
-  ) {
-    super(app);
-  }
-  onOpen(): void {
-    this.contentEl.createEl("h3", { text: this.titleText });
-    this.contentEl.createEl("p", { text: this.message });
-    const row = this.contentEl.createDiv();
-    row.setCssStyles({ display: "flex", gap: "8px", justifyContent: "flex-end", marginTop: "12px" });
-    const cancel = row.createEl("button", { text: "取消" });
-    const ok = row.createEl("button", { text: "删除" });
-    ok.classList.add("mod-warning");
-    cancel.onclick = () => { this.onPick(false); this.close(); };
-    ok.onclick = () => { this.onPick(true); this.close(); };
-  }
-  onClose(): void {
-    this.contentEl.empty();
-  }
-}
-
-// 存为笔记的选项框：附提问原文（默认随全局设置） + 配图（默认关）。
-// 按钮先回调再 close，避免与 onClose 的兜底重复 resolve。
-class SaveOptionsModal extends Modal {
-  constructor(
-    app: App,
-    private noteTitle: string,
-    private defaults: { append: boolean; hasImage: boolean },
-    private onPick: (v: { append: boolean; image: boolean } | null) => void,
-  ) {
-    super(app);
-  }
-  onOpen(): void {
-    this.contentEl.createEl("h3", { text: `存为笔记：「${this.noteTitle}」` });
-
-    let append = this.defaults.append;
-    let image = false;
-
-    const mkCheck = (label: string, initial: boolean, onChange: (v: boolean) => void): void => {
-      const row = this.contentEl.createDiv();
-      row.setCssStyles({ display: "flex", alignItems: "center", gap: "8px", margin: "8px 0" });
-      const cb = row.createEl("input", { type: "checkbox" });
-      cb.checked = initial;
-      cb.onchange = () => onChange(cb.checked);
-      const lab = row.createEl("label", { text: label });
-      lab.setCssStyles({ cursor: "pointer" });
-      lab.onclick = () => { cb.checked = !cb.checked; onChange(cb.checked); };
-    };
-
-    mkCheck("附上我的提问原文", append, v => (append = v));
-    mkCheck("为这篇配一张隐喻图（基于标题）", image, v => (image = v));
-
-    const row = this.contentEl.createDiv();
-    row.setCssStyles({ display: "flex", gap: "8px", justifyContent: "flex-end", marginTop: "12px" });
-    const cancel = row.createEl("button", { text: "取消" });
-    const save = row.createEl("button", { text: "保存" });
-    save.classList.add("mod-cta");
-    cancel.onclick = () => { this.onPick(null); this.close(); };
-    save.onclick = () => { this.onPick({ append, image }); this.close(); };
-  }
-  onClose(): void {
-    this.contentEl.empty();
   }
 }

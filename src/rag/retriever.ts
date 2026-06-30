@@ -14,6 +14,6 @@ export class Retriever {
   async retrieve(query: string, k = 8): Promise<QueryHit[]> {
     if (this.ready) await this.ready();
     const qv = await this.embedder.embedQuery(query);
-    return this.store.query(qv, k, this.settings.retrievalMinScore);
+    return await this.store.query(qv, k, this.settings.retrievalMinScore);
   }
 }

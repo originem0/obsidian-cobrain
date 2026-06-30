@@ -25,32 +25,48 @@ export function parseEmbeddingResponse(json: unknown, expectedCount: number): nu
   if (json.data.length !== expectedCount) {
     throw new Error(`嵌入 API 返回数量不匹配：请求 ${expectedCount}，返回 ${json.data.length}`);
   }
-  const seen = new Set<number>();
-  const data: Array<{ embedding: number[]; index: number }> = [];
+  // 先抽出每项 embedding，并记录是否带数字 index。
+  // OpenAI 规范每项带 index，但不少「兼容」端点(LM Studio / 部分自建 shim)按数组顺序返回、不带 index。
+  // 策略：全带 index → 按 index 排序；全不带 → 按数组顺序；半带半不带 → 无法可靠对齐，报错。
+  const items: Array<{ embedding: number[]; index: number | null }> = [];
+  let withIndex = 0;
   for (const item of json.data) {
-    if (!item || typeof item !== "object" || !("embedding" in item) || !Array.isArray(item.embedding) || !("index" in item) || typeof item.index !== "number") {
-      throw new Error("嵌入 API 返回格式异常：data 项缺少 embedding/index");
+    if (!item || typeof item !== "object" || !("embedding" in item) || !Array.isArray(item.embedding)) {
+      throw new Error("嵌入 API 返回格式异常：data 项缺少 embedding");
     }
-    const index = item.index;
-    if (!Number.isInteger(index) || index < 0 || index >= expectedCount || seen.has(index)) {
-      throw new Error("嵌入 API 返回 index 不连续或重复");
-    }
-    seen.add(index);
     const embedding = item.embedding as unknown[];
     if (!embedding.length || embedding.some(v => typeof v !== "number" || !Number.isFinite(v))) {
       throw new Error("嵌入 API 返回向量包含非有限数值");
     }
-    data.push({ embedding: embedding as number[], index });
+    const rawIndex = (item as Record<string, unknown>).index;
+    const index = typeof rawIndex === "number" ? rawIndex : null;
+    if (index !== null) withIndex++;
+    items.push({ embedding: embedding as number[], index });
   }
-  for (let i = 0; i < expectedCount; i++) {
-    if (!seen.has(i)) throw new Error("嵌入 API 返回 index 不连续或重复");
+  if (withIndex !== 0 && withIndex !== items.length) {
+    throw new Error("嵌入 API 返回 index 不一致：部分项缺少 index");
   }
-  data.sort((a, b) => a.index - b.index);
-  const dim = data[0]?.embedding.length ?? 0;
-  if (!dim || data.some(d => d.embedding.length !== dim)) {
+  let ordered: number[][];
+  if (withIndex === items.length) {
+    // 全带 index：校验连续不重复后按 index 排序
+    const seen = new Set<number>();
+    for (const it of items) {
+      const i = it.index as number;
+      if (!Number.isInteger(i) || i < 0 || i >= expectedCount || seen.has(i)) {
+        throw new Error("嵌入 API 返回 index 不连续或重复");
+      }
+      seen.add(i);
+    }
+    ordered = items.slice().sort((a, b) => (a.index as number) - (b.index as number)).map(it => it.embedding);
+  } else {
+    // 全不带 index：按数组顺序对齐请求顺序
+    ordered = items.map(it => it.embedding);
+  }
+  const dim = ordered[0]?.length ?? 0;
+  if (!dim || ordered.some(e => e.length !== dim)) {
     throw new Error("嵌入 API 返回向量维度不一致");
   }
-  return data.map(d => normalize(d.embedding));
+  return ordered.map(normalize);
 }
 
 // OpenAI 兼容的云端 embeddings。用 Obsidian requestUrl（免 CORS）异步调用，不占用主线程。

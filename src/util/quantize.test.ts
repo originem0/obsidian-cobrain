@@ -1,4 +1,4 @@
-import { quantizeVector, dequantizeVector } from "./quantize";
+import { quantizeVector, dequantizeVector, quantizeToBytes, dotQuantized } from "./quantize";
 
 function normalize(v: number[]): number[] {
   const n = Math.sqrt(v.reduce((s, x) => s + x * x, 0)) || 1;
@@ -38,4 +38,20 @@ test("含负值往返：每维误差不超过量化步长", () => {
   for (let i = 0; i < v.length; i++) {
     expect(Math.abs(back[i] - v[i])).toBeLessThanOrEqual(scale / 127 + 1e-9);
   }
+});
+
+test("dotQuantized 与「反量化后再点积」数值等价（评分语义不变）", () => {
+  const a = normalize(Array.from({ length: 64 }, (_, i) => Math.sin(i)));
+  const query = normalize(Array.from({ length: 64 }, (_, i) => Math.cos(i * 0.3)));
+  const { scale, bytes } = quantizeToBytes(a);
+
+  const fast = dotQuantized(query, bytes, scale);
+  const back = dequantizeVector(scale, quantizeVector(a).q);
+  const slow = query.reduce((s, x, i) => s + x * back[i], 0);
+
+  expect(fast).toBeCloseTo(slow, 8);
+});
+
+test("dotQuantized 对零向量返回 0", () => {
+  expect(dotQuantized([1, 2, 3], new Int8Array([0, 0, 0]), 0)).toBe(0);
 });

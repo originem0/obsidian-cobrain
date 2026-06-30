@@ -12,6 +12,7 @@ import { ImageClient } from "./llm/imageClient";
 import { buildQuote, findHeadingAbove, extractContext } from "./util/quote";
 import { IndexStore } from "./rag/indexStore";
 import type { IndexFailure } from "./rag/indexer";
+import { askDraftChoice } from "./ui/modals";
 
 export interface SavedNoteState {
   stateSignature: string;
@@ -28,16 +29,7 @@ export interface ChatDraft {
   savedAt: number;
 }
 
-function askDraftChoice(app: App, id: number): Promise<"restore" | "new" | null> {
-  return new Promise(resolve => {
-    let done = false;
-    const finish = (v: "restore" | "new" | null) => { if (!done) { done = true; resolve(v); } };
-    const m = new DraftChoiceModal(app, id, finish);
-    const close = m.onClose.bind(m);
-    m.onClose = () => { close(); finish(null); };
-    m.open();
-  });
-}
+// askDraftChoice 与 DraftChoiceModal 已抽到 ./ui/modals。
 
 export function normalizeChatDrafts(raw: unknown): Record<number, ChatDraft> {
   const out: Record<number, ChatDraft> = {};
@@ -97,6 +89,9 @@ export default class CobrainPlugin extends Plugin {
   // 设置页逐字符 onChange 走这个防抖版：停顿 400ms 才落盘，避免每键一次写。
   // 索引在 index/ 分片里（见 IndexStore），settings 本身已很小，这里再省掉高频小写入。
   saveSettingsDebounced = debounce(() => void this.saveSettings(), 400, true);
+  // 草稿落盘走防抖：连续对话时每条消息都 persistDraft，800ms 合并一次写，避免每条触发一次全量 data.json 写。
+  // 关闭面板/卸载时 flushDrafts 强制冲一次，把崩溃丢失收敛到 <800ms 的草稿级风险。
+  saveDraftsDebounced = debounce(() => void this.saveSettings(), 800, true);
   private disposed = false; // 卸载后置位：阻止已排队的防抖回调在插件卸载后继续写盘
   // 索引加载较重（数百分片 + 上万向量反量化），不放进 onload 关键路径，否则 Obsidian 报「加载耗时过长」。
   // onload 后台启动加载，检索/重嵌前先 await 它，确保不会查到半截索引。
@@ -246,6 +241,8 @@ export default class CobrainPlugin extends Plugin {
   }
 
   onunload() {
+    // 卸载前把可能仍在防抖窗口里的草稿冲一次盘（in-memory 已是最新）
+    this.flushDrafts();
     // 清掉所有挂起的防抖重嵌定时器：用的是裸 setTimeout（非 registerInterval），
     // 不主动清的话，插件卸载/更新后回调仍会 fire，对已卸载实例 saveData。
     this.disposed = true;
@@ -304,6 +301,11 @@ export default class CobrainPlugin extends Plugin {
 
   clearChatDraft(id: number): void {
     delete this.chatDrafts[id];
+    this.saveDraftsDebounced();
+  }
+
+  // 强制把草稿(及设置)立刻落盘，绕过防抖。面板关闭(onClose)/插件卸载(onunload)时调用。
+  flushDrafts(): void {
     void this.saveSettings();
   }
 
@@ -317,7 +319,7 @@ export default class CobrainPlugin extends Plugin {
         savedAt: Date.now(),
       };
     }
-    void this.saveSettings();
+    this.saveDraftsDebounced();
   }
 
   async resetIndexForEmbedModelChange(): Promise<void> {
@@ -377,7 +379,8 @@ export default class CobrainPlugin extends Plugin {
     }
 
     const viewType = `${VIEW_TYPE_COBRAIN_CHAT}-${freeId}`;
-    const leaf = this.app.workspace.getRightLeaf(false)!;
+    const leaf = this.app.workspace.getRightLeaf(false);
+    if (!leaf) { new Notice("无法打开侧栏面板"); return; }
     await leaf.setViewState({ type: viewType, active: true });
     await this.app.workspace.revealLeaf(leaf);
     this.activeViewIds.add(freeId);
@@ -474,30 +477,6 @@ class QueryModal extends Modal {
   onClose() { this.contentEl.empty(); }
 }
 
-class DraftChoiceModal extends Modal {
-  constructor(
-    app: App,
-    private id: number,
-    private onPick: (v: "restore" | "new" | null) => void,
-  ) { super(app); }
-
-  onOpen() {
-    this.contentEl.createEl("h3", { text: `创作副脑 #${this.id} 有未结束草稿` });
-    this.contentEl.createEl("p", { text: "恢复会继续上次对话。新建会清空这个槽位的草稿。" });
-    const row = this.contentEl.createDiv();
-    row.setCssStyles({ display: "flex", gap: "8px", justifyContent: "flex-end", marginTop: "12px", flexWrap: "wrap" });
-    const cancel = row.createEl("button", { text: "取消" });
-    const fresh = row.createEl("button", { text: "新建空对话" });
-    const restore = row.createEl("button", { text: "恢复草稿" });
-    restore.classList.add("mod-cta");
-    cancel.onclick = () => { this.onPick(null); this.close(); };
-    fresh.onclick = () => { this.onPick("new"); this.close(); };
-    restore.onclick = () => { this.onPick("restore"); this.close(); };
-  }
-
-  onClose() { this.contentEl.empty(); }
-}
-
 // 检索结果弹窗：展示分数 + 路径 + 标题 + 正文片段，便于人工判断检索质量
 class ResultsModal extends Modal {
   constructor(app: App, private query: string, private hits: QueryHit[]) { super(app); }
@@ -542,6 +521,9 @@ class IndexStatusModal extends Modal {
     const { contentEl } = this;
     const fmt = (ts: number | null) => ts ? new Date(ts).toLocaleString() : "本次启动后暂无记录";
     contentEl.createEl("h3", { text: "索引状态" });
+    contentEl.createEl("p", {
+      text: Platform.isMobile ? "本设备：移动端（只读检索，不写索引）" : "本设备：桌面端（索引写入方）",
+    });
     contentEl.createEl("p", { text: `状态：${this.status.running ? "正在索引" : "空闲"}` });
     contentEl.createEl("p", { text: `嵌入模型：${this.status.embedModel}` });
     contentEl.createEl("p", { text: `已索引笔记：${this.status.indexedFiles} 篇` });
