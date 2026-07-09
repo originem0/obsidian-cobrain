@@ -4,17 +4,18 @@ import type { QueryHit } from "../rag/vectorStore";
 import { saveNote, saveImage } from "../noteWriter";
 import { extractMermaid } from "../util/mermaid";
 import { fnv1a } from "../util/hash";
+import { CancelledError, makeCancellable } from "../util/cancellable";
+import { SUMMARY_HISTORY_LIMIT } from "../tutor/tutor";
 import type CobrainPlugin from "../main";
-import type { SavedNoteState } from "../main";
+import type { SavedNoteState, ContextSummaryState } from "../main";
 import { askPrompt, askTextArea, askConfirm, askSaveOptions } from "./modals";
 
 export const VIEW_TYPE_COBRAIN_CHAT = "cobrain-chat";
 
 const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e));
 const CHAT_CONTEXT_MSG_LIMIT = 20;
-
-// 用户点「停止」时用它拒绝在途请求：与真实错误区分，停止不显示报错气泡。
-class CancelledError extends Error { constructor() { super("已停止"); } }
+// 滚动摘要攒批阈值：窗口外未覆盖的消息不足这个数就先不总结，避免每来一条就打一次摘要请求
+const SUMMARY_BATCH_MIN = 6;
 
 export function chatStateSignature(
   history: ChatMsg[],
@@ -34,28 +35,55 @@ export function chatHistoryForModel(history: ChatMsg[]): ChatMsg[] {
   return history.slice(-CHAT_CONTEXT_MSG_LIMIT);
 }
 
-export function chatContextLimitText(historyLength: number): string | null {
-  if (historyLength <= CHAT_CONTEXT_MSG_LIMIT) return null;
-  return `更早的 ${historyLength - CHAT_CONTEXT_MSG_LIMIT} 条消息已保存在草稿里，但本轮不会发给模型。`;
+// 截断提示随摘要状态分档：全覆盖 / 部分覆盖（摘要在攒批或更新中）/ 尚无摘要。
+export function chatContextLimitText(historyLength: number, summarizedCount = 0): string | null {
+  const overflow = historyLength - CHAT_CONTEXT_MSG_LIMIT;
+  if (overflow <= 0) return null;
+  if (summarizedCount >= overflow) return `更早的 ${overflow} 条消息已压缩成滚动摘要，随本轮对话一起发给模型。`;
+  if (summarizedCount > 0) return `更早的 ${overflow} 条消息中 ${summarizedCount} 条已压缩成滚动摘要；其余 ${overflow - summarizedCount} 条待下次压缩，本轮不发给模型。`;
+  return `更早的 ${overflow} 条消息暂未发给模型（对话继续时会自动压缩成滚动摘要）。`;
 }
 
-// 带秒数计时的等待气泡：创建即开始计时，stop() 清计时器并移除气泡。
-// 把「思考中」从不可观测的等待变成可观测的等待——用户知道副脑在跑、跑了多久。
-function thinkingBubble(parent: HTMLElement, label: string): { el: HTMLElement; stop: () => void } {
-  const el = parent.createDiv({ cls: "cobrain-bubble cobrain-bubble-ai" });
-  el.createDiv({ cls: "cobrain-who", text: "副脑" });
-  const body = el.createDiv();
-  const labelSpan = body.createSpan({ text: label });
-  const secSpan = body.createSpan({ text: " 0s", cls: "cobrain-timer" });
-  secSpan.setCssStyles({ opacity: "0.6", fontSize: "0.9em" });
-  const start = Date.now();
-  const timer = window.setInterval(() => {
-    secSpan.setText(" " + Math.floor((Date.now() - start) / 1000) + "s");
-  }, 1000);
-  parent.scrollTop = parent.scrollHeight;
+// 摘要批计算（纯函数）：返回本次应并入摘要的 history 区间 [from, to)，不足攒批阈值返回 null。
+// to 恒为「窗口左边界」——只总结已滑出 20 条窗口的消息，窗口内的始终原文发送、不摘要。
+export function summaryUpdatePlan(
+  historyLength: number,
+  coveredCount: number,
+  windowLimit = CHAT_CONTEXT_MSG_LIMIT,
+  batchMin = SUMMARY_BATCH_MIN,
+): { from: number; to: number } | null {
+  const overflowEnd = historyLength - windowLimit;
+  if (overflowEnd - coveredCount < batchMin) return null;
+  return { from: coveredCount, to: overflowEnd };
+}
+
+export interface SaveSnapshot {
+  history: ChatMsg[];
+  sources: string[];
+  mermaid: string | null;
+  imageEmbed: string | null;
+}
+
+// 保存成功后的状态消费（纯函数）：只清掉本次快照真正用掉的产物——
+// 保存弹窗/出图期间用户继续聊天或重新生成的新产物不能被误清。
+// 不变量：保存后若用户未再改动，当前状态签名 chatStateSignature(history, [...sources], mermaid, image)
+// 与这里记录的 lastSavedNote.stateSignature 相等，重复点「存为笔记」命中去重。
+// 若改动清空口径，务必同步签名参数，否则去重会失效或误判。
+export function consumeSavedSnapshot(
+  current: { lastMermaid: string | null; lastImageEmbed: string | null },
+  snapshot: SaveSnapshot,
+  path: string,
+  savedAt: number,
+): { lastMermaid: string | null; lastImageEmbed: string | null; consumedSources: string[]; lastSavedNote: SavedNoteState } {
   return {
-    el,
-    stop: () => { window.clearInterval(timer); el.remove(); },
+    lastMermaid: current.lastMermaid === snapshot.mermaid ? null : current.lastMermaid,
+    lastImageEmbed: current.lastImageEmbed === snapshot.imageEmbed ? null : current.lastImageEmbed,
+    consumedSources: snapshot.sources,
+    lastSavedNote: {
+      stateSignature: chatStateSignature(snapshot.history, [], null, null),
+      path,
+      savedAt,
+    },
   };
 }
 
@@ -69,12 +97,18 @@ function timedNotice(label: string): { notice: Notice; stop: () => void } {
   return { notice, stop: () => { window.clearInterval(timer); notice.hide(); } };
 }
 
-// 把回调式 Modal 包成 Promise 的 askPrompt/askTextArea/askConfirm/askSaveOptions 及其弹窗类已抽到 ./modals。
-
 function isUnderFolder(path: string, folder: string): boolean {
   const p = normalizePath(path);
   const f = normalizePath(folder).replace(/\/+$/, "");
   return !!f && p.startsWith(f + "/");
+}
+
+// 流式回答气泡的控制柄（见 ChatView.streamingBubble）
+interface StreamBubble {
+  el: HTMLElement;
+  append: (text: string) => void;
+  finish: (fullText: string) => Promise<void>;
+  remove: () => void;
 }
 
 export class ChatView extends ItemView {
@@ -83,6 +117,10 @@ export class ChatView extends ItemView {
   private lastMermaid: string | null = null;
   private lastImageEmbed: string | null = null;
   private lastSavedNote: SavedNoteState | null = null;
+  private contextSummary: ContextSummaryState | null = null;
+  // 清空/关闭面板时 +1：使在途的后台摘要任务作废，避免迟到结果写进已清空的对话或已关闭的面板
+  private summaryGen = 0;
+  private summaryInFlight = false;
   private messagesEl!: HTMLElement;
   private welcomeEl!: HTMLElement;
   private contextLimitEl!: HTMLElement;
@@ -91,7 +129,8 @@ export class ChatView extends ItemView {
   private actionButtons: HTMLButtonElement[] = [];
   private saveNoteBtn!: HTMLButtonElement;
   private busy = false; // 一次只跑一轮 ask，避免连发导致 history 交错
-  private currentCancel: (() => void) | null = null; // 「停止」按钮：拒绝当前在途请求
+  private currentCancel: (() => void) | null = null; // 「停止」按钮：拒绝当前在途请求（UI 立即解锁）
+  private currentAbort: AbortController | null = null; // 「停止」同时中止底层 fetch（流式路径真正停掉请求）
   private pendingSourceContexts: string[] = []; // 引用带来的源笔记小节，只喂给紧接着的那一问
   private instanceId: number; // 实例 ID（1/2/3）
 
@@ -120,6 +159,7 @@ export class ChatView extends ItemView {
       this.lastMermaid = draft.lastMermaid;
       this.lastImageEmbed = draft.lastImageEmbed;
       this.lastSavedNote = draft.lastSavedNote;
+      this.contextSummary = draft.contextSummary;
       this.messagesEl.createDiv({ cls: "cobrain-restored", text: "已恢复上次未关闭的对话草稿。" });
       for (const msg of this.history) {
         if (msg.role === "user" || msg.role === "assistant") this.addBubble(msg.role, msg.content);
@@ -183,6 +223,7 @@ export class ChatView extends ItemView {
       lastMermaid: this.lastMermaid,
       lastImageEmbed: this.lastImageEmbed,
       lastSavedNote: this.lastSavedNote,
+      contextSummary: this.contextSummary,
     });
   }
 
@@ -197,7 +238,7 @@ export class ChatView extends ItemView {
 
   private updateContextLimitNotice(): void {
     if (!this.contextLimitEl) return;
-    const text = chatContextLimitText(this.history.length);
+    const text = chatContextLimitText(this.history.length, this.contextSummary?.coveredCount ?? 0);
     if (text) {
       this.contextLimitEl.setText(text);
       this.contextLimitEl.style.display = "";
@@ -231,6 +272,33 @@ export class ChatView extends ItemView {
     return chatStateSignature(history, sources, mermaid, imageEmbed);
   }
 
+  // 滑出 limit 条窗口时把滚动摘要作为背景材料带上；窗口装得下就不带（全部原文在场，摘要是冗余）。
+  private earlierSummaryFor(limit: number): string | undefined {
+    if (!this.contextSummary?.text) return undefined;
+    return this.history.length > limit ? this.contextSummary.text : undefined;
+  }
+
+  // 后台维护滚动摘要：把滑出 20 条窗口、尚未纳入摘要的旧消息并入既有摘要。
+  // fire-and-forget：失败只记日志、下轮对话自动重试；generation 计数使清空/关闭后的迟到结果作废。
+  private maybeUpdateSummary(): void {
+    const plan = summaryUpdatePlan(this.history.length, this.contextSummary?.coveredCount ?? 0);
+    if (!plan || this.summaryInFlight) return;
+    if (this.plugin.chatConfigProblem()) return;
+    const gen = this.summaryGen;
+    const dropped = this.history.slice(plan.from, plan.to);
+    const prev = this.contextSummary?.text ?? "";
+    this.summaryInFlight = true;
+    this.plugin.tutor.updateRollingSummary(prev, dropped)
+      .then(text => {
+        if (gen !== this.summaryGen || !text) return;
+        this.contextSummary = { text, coveredCount: plan.to };
+        this.updateContextLimitNotice();
+        this.persistDraft();
+      })
+      .catch(e => console.warn("Cobrain: 滚动摘要更新失败（下轮自动重试）", e))
+      .finally(() => { this.summaryInFlight = false; });
+  }
+
   private addBubble(role: "user" | "assistant", text: string, sources?: string[]): HTMLElement {
     const b = this.messagesEl.createDiv({ cls: `cobrain-bubble cobrain-bubble-${role === "user" ? "user" : "ai"}` });
     b.createDiv({ cls: "cobrain-who", text: role === "user" ? "你" : "副脑" });
@@ -249,8 +317,52 @@ export class ChatView extends ItemView {
     return b;
   }
 
+  // 流式回答气泡：创建即显示「label + 秒数」计时；首个增量到达后切换为逐字纯文本；
+  // finish() 用完整文本做一次 Markdown 渲染（流式期间渲染半截 Markdown 会闪烁/错排，纯文本最稳）。
+  private streamingBubble(label: string): StreamBubble {
+    const el = this.messagesEl.createDiv({ cls: "cobrain-bubble cobrain-bubble-ai" });
+    el.createDiv({ cls: "cobrain-who", text: "副脑" });
+    const body = el.createDiv();
+    const labelSpan = body.createSpan({ text: label });
+    const secSpan = body.createSpan({ text: " 0s", cls: "cobrain-timer" });
+    secSpan.setCssStyles({ opacity: "0.6", fontSize: "0.9em" });
+    const start = Date.now();
+    let timer: number | null = window.setInterval(() => {
+      secSpan.setText(" " + Math.floor((Date.now() - start) / 1000) + "s");
+    }, 1000);
+    const stopTimer = () => {
+      if (timer !== null) { window.clearInterval(timer); timer = null; }
+    };
+    this.messagesEl.scrollTop = this.messagesEl.scrollHeight;
+
+    let streamEl: HTMLElement | null = null;
+    let acc = "";
+    return {
+      el,
+      append: (text: string) => {
+        if (!streamEl) {
+          stopTimer();
+          labelSpan.remove();
+          secSpan.remove();
+          streamEl = body.createDiv({ cls: "cobrain-stream" });
+        }
+        acc += text;
+        // 逐字更新期间只在用户本来就贴着底部时才跟随滚动，别抢用户往回翻的滚动条
+        const nearBottom = this.messagesEl.scrollHeight - this.messagesEl.scrollTop - this.messagesEl.clientHeight < 60;
+        streamEl.setText(acc);
+        if (nearBottom) this.messagesEl.scrollTop = this.messagesEl.scrollHeight;
+      },
+      finish: async (fullText: string) => {
+        stopTimer();
+        body.empty();
+        await this.renderAssistant(body, fullText);
+        this.messagesEl.scrollTop = this.messagesEl.scrollHeight;
+      },
+      remove: () => { stopTimer(); el.remove(); },
+    };
+  }
+
   // 渲染助手消息：先 await Markdown 渲染，再挂 Mermaid 切换 / 配图交互。
-  // 旧实现用固定 150ms setTimeout 猜渲染完成，慢渲染下会静默失效；改为 await + 等元素真正出现。
   private async renderAssistant(body: HTMLElement, text: string): Promise<void> {
     await MarkdownRenderer.render(this.app, text, body, "", this);
     const mermaidMatch = text.match(/```mermaid\n([\s\S]*?)```/);
@@ -370,7 +482,8 @@ export class ChatView extends ItemView {
   }
 
   // 把检索命中的旧笔记显式列出来、可点开，让第二大脑的联想发生在用户眼前。
-  private addRelatedBlock(hits: QueryHit[]): void {
+  // before 提供时插到该元素前面：流式场景下气泡先创建、检索结果后到，仍保持「相关笔记在上、回答在下」。
+  private addRelatedBlock(hits: QueryHit[], before?: HTMLElement): void {
     if (!hits.length) return;
     const seen = new Set<string>();
     const uniq = hits.filter(h => {
@@ -379,6 +492,7 @@ export class ChatView extends ItemView {
       return true;
     });
     const wrap = this.messagesEl.createDiv({ cls: "cobrain-related" });
+    if (before) this.messagesEl.insertBefore(wrap, before);
     wrap.createDiv({ cls: "cobrain-related-head", text: "相关旧笔记" });
     uniq.slice(0, 8).forEach(h => {
       const item = wrap.createDiv({ cls: "cobrain-related-item" });
@@ -397,12 +511,13 @@ export class ChatView extends ItemView {
     return "";
   }
 
-  // 占用面板：busy 期间禁用输入，发送键变「停止」（可取消在途请求），三个按钮互斥避免并发交错。
+  // 占用面板：busy 期间禁用输入，发送键变「停止」，三个按钮互斥避免并发交错。
+  // 每次占用配一个新 AbortController：走 fetch 的请求可被「停止」真正中止。
   private acquire(): boolean {
     if (this.busy) { new Notice("正在处理上一个请求，请稍候…"); return false; }
     this.busy = true;
+    this.currentAbort = new AbortController();
     this.inputEl.disabled = true;
-    // 发送键转为「停止」：requestUrl 无法真正中止，停止只解锁 UI、放弃结果（底层请求仍会在后台跑完）
     this.sendBtn.disabled = false;
     this.sendBtn.setText("停止");
     this.sendBtn.onclick = () => this.cancelCurrent();
@@ -412,6 +527,7 @@ export class ChatView extends ItemView {
   private release(): void {
     this.busy = false;
     this.currentCancel = null;
+    this.currentAbort = null;
     this.inputEl.disabled = false;
     this.sendBtn.disabled = false;
     this.sendBtn.setText("发送");
@@ -419,19 +535,24 @@ export class ChatView extends ItemView {
     this.updateActionButtons();
   }
 
-  // 点「停止」：拒绝在途请求（runCancellable 的竞速），等待中的处理流程抛 CancelledError 并解锁。
-  private cancelCurrent(): void {
-    if (!this.currentCancel) return;
-    this.currentCancel();
-    new Notice("已停止（请求可能仍在后台完成）");
+  private currentSignal(): AbortSignal | undefined {
+    return this.currentAbort?.signal;
   }
 
-  // 把一次网络等待包成可取消：与 cancel 竞速。点「停止」即 reject，UI 立即解锁；底层 requestUrl 仍会跑完。
+  // 点「停止」：中止底层 fetch（流式路径请求真正停掉），并拒绝在途等待、立即解锁 UI。
+  // requestUrl 兜底路径无法中止：那种情况下停止只是放弃结果，请求仍会在后台跑完。
+  private cancelCurrent(): void {
+    if (!this.currentCancel && !this.currentAbort) return;
+    this.currentAbort?.abort();
+    this.currentCancel?.();
+    new Notice("已停止");
+  }
+
+  // 把一次网络等待包成可取消（makeCancellable 的竞速）：点「停止」即 reject，UI 立即解锁。
   private runCancellable<T>(p: Promise<T>): Promise<T> {
-    let rejectCancel: (e: Error) => void;
-    const cancel = new Promise<never>((_, reject) => { rejectCancel = reject; });
-    this.currentCancel = () => rejectCancel(new CancelledError());
-    return Promise.race([p, cancel]).finally(() => { this.currentCancel = null; });
+    const { result, cancel } = makeCancellable(p);
+    this.currentCancel = cancel;
+    return result.finally(() => { this.currentCancel = null; });
   }
 
   // 把"引用"(来源链接 + 原文)预填进输入框；来源上下文暂存，喂给紧接着的那一问。
@@ -454,6 +575,7 @@ export class ChatView extends ItemView {
     }
     if (!this.acquire()) return;
     const priorHistory = chatHistoryForModel(this.history);
+    const earlierSummary = this.earlierSummaryFor(CHAT_CONTEXT_MSG_LIMIT);
     const sourceContext = this.pendingSourceContexts.length
       ? this.pendingSourceContexts.join("\n\n---\n\n")
       : undefined; // 消费一次：仅这一问带来源上下文
@@ -462,18 +584,42 @@ export class ChatView extends ItemView {
     this.autoGrow();
     this.addBubble("user", text);
     this.appendHistory({ role: "user", content: text });
-    const thinking = thinkingBubble(this.messagesEl, "思考中…");
+    const bubble = this.streamingBubble("思考中…");
+    let streamed = "";
+    let retrievedSources: string[] = []; // 检索一完成就记下：中途停止但保留部分回答时，来源同样要入账
+    let settled = false; // 取消/完成后到达的迟到增量与检索回调不再上屏
     try {
-      const { reply, sources, related } = await this.runCancellable(this.plugin.tutor.ask(priorHistory, text, sourceContext));
-      thinking.stop();
-      // 先把你自己写过的相关旧笔记摊到眼前（第二大脑「联想」），再看导师的回应
-      this.addRelatedBlock(related);
-      this.addBubble("assistant", reply);
+      const { reply, sources } = await this.runCancellable(this.plugin.tutor.ask(priorHistory, text, {
+        sourceContext,
+        earlierSummary,
+        signal: this.currentSignal(),
+        onRetrieved: (related, sources) => {
+          if (settled) return;
+          retrievedSources = sources;
+          this.addRelatedBlock(related, bubble.el);
+        },
+        onDelta: t => {
+          if (settled) return;
+          streamed += t;
+          bubble.append(t);
+        },
+      }));
+      settled = true;
+      await bubble.finish(reply);
       sources.forEach(s => this.sources.add(s));
       this.appendHistory({ role: "assistant", content: reply });
+      this.maybeUpdateSummary();
     } catch (e) {
-      thinking.stop();
-      if (!(e instanceof CancelledError)) {
+      settled = true;
+      if (e instanceof CancelledError) {
+        // 已流出的部分回答保留并入历史：用户看到了它，重开面板不该凭空消失
+        if (streamed.trim()) {
+          await bubble.finish(streamed);
+          retrievedSources.forEach(s => this.sources.add(s));
+          this.appendHistory({ role: "assistant", content: streamed });
+        } else bubble.remove();
+      } else {
+        bubble.remove();
         this.addBubble("assistant", "出错了：" + errMsg(e));
         this.persistDraft();
       }
@@ -489,16 +635,19 @@ export class ChatView extends ItemView {
       return;
     }
     if (!this.acquire()) return;
-    const bubble = thinkingBubble(this.messagesEl, "画概念图中…");
+    const bubble = this.streamingBubble("画概念图中…");
     try {
-      const raw = await this.runCancellable(this.plugin.tutor.conceptMap(this.history));
+      // 概念图不逐字流式：半截 Mermaid 渲染不出来，等完整结果一次上屏
+      const raw = await this.runCancellable(this.plugin.tutor.conceptMap(this.history, {
+        signal: this.currentSignal(),
+        earlierSummary: this.earlierSummaryFor(SUMMARY_HISTORY_LIMIT),
+      }));
       this.lastMermaid = extractMermaid(raw);
-      bubble.stop();
-      this.addBubble("assistant", this.lastMermaid ?? "（未能生成有效的概念图）\n\n" + raw);
+      await bubble.finish(this.lastMermaid ?? "（未能生成有效的概念图）\n\n" + raw);
       this.persistDraft();
     } catch (e) {
       this.lastMermaid = null; // 失败不保留上一个话题的旧图，避免存笔记时把陈旧图串进去
-      bubble.stop();
+      bubble.remove();
       if (!(e instanceof CancelledError)) this.addBubble("assistant", "概念图失败：" + errMsg(e));
     } finally {
       this.release();
@@ -511,15 +660,34 @@ export class ChatView extends ItemView {
       return;
     }
     if (!this.acquire()) return;
-    const bubble = thinkingBubble(this.messagesEl, "推敲中…");
+    const bubble = this.streamingBubble("推敲中…");
+    let streamed = "";
+    let settled = false;
     try {
-      const reply = await this.runCancellable(this.plugin.tutor.critique(this.history));
-      bubble.stop();
-      this.addBubble("assistant", reply);
+      const reply = await this.runCancellable(this.plugin.tutor.critique(this.history, {
+        signal: this.currentSignal(),
+        earlierSummary: this.earlierSummaryFor(SUMMARY_HISTORY_LIMIT),
+        onDelta: t => {
+          if (settled) return;
+          streamed += t;
+          bubble.append(t);
+        },
+      }));
+      settled = true;
+      await bubble.finish(reply);
       this.appendHistory({ role: "assistant", content: reply });
+      this.maybeUpdateSummary();
     } catch (e) {
-      bubble.stop();
-      if (!(e instanceof CancelledError)) this.addBubble("assistant", "推敲失败：" + errMsg(e));
+      settled = true;
+      if (e instanceof CancelledError) {
+        if (streamed.trim()) {
+          await bubble.finish(streamed);
+          this.appendHistory({ role: "assistant", content: streamed });
+        } else bubble.remove();
+      } else {
+        bubble.remove();
+        this.addBubble("assistant", "推敲失败：" + errMsg(e));
+      }
     } finally {
       this.release();
     }
@@ -534,7 +702,7 @@ export class ChatView extends ItemView {
       const t = timedNotice("构思配图主题中…");
       let cancelled = false;
       try {
-        seed = await this.runCancellable(this.plugin.tutor.imageConcept(this.history));
+        seed = await this.runCancellable(this.plugin.tutor.imageConcept(this.history, this.currentSignal()));
       } catch (e) {
         if (e instanceof CancelledError) cancelled = true;
         // 其它失败：回退到最近发言，不打断配图
@@ -556,7 +724,7 @@ export class ChatView extends ItemView {
     let scene: string;
     const t = timedNotice("扩写配图提示词中…");
     try {
-      scene = await this.runCancellable(this.plugin.tutor.imagePrompt(concept));
+      scene = await this.runCancellable(this.plugin.tutor.imagePrompt(concept, this.currentSignal()));
     } catch (e) {
       if (!(e instanceof CancelledError)) new Notice("提示词扩写失败：" + errMsg(e));
       return null;
@@ -571,17 +739,16 @@ export class ChatView extends ItemView {
     const finalPrompt = await askTextArea(this.app, "确认 / 编辑配图提示词", fullPrompt);
     if (!finalPrompt) return null;
     if (!this.acquire()) return null;
-    const bubble = thinkingBubble(this.messagesEl, `为「${concept}」配图中…（图像生成较慢，约 1 分钟）`);
+    const bubble = this.streamingBubble(`为「${concept}」配图中…（图像生成较慢，约 1 分钟）`);
     try {
       const buf = await this.runCancellable(this.plugin.image.generate(finalPrompt));
       const path = await saveImage(this.app, this.plugin.settings, buf);
       this.lastImageEmbed = `![[${path}]]`;
-      bubble.stop();
-      this.addBubble("assistant", `「${concept}」配图：\n\n${this.lastImageEmbed}`);
+      await bubble.finish(`「${concept}」配图：\n\n${this.lastImageEmbed}`);
       this.persistDraft();
       return this.lastImageEmbed;
     } catch (e) {
-      bubble.stop();
+      bubble.remove();
       if (!(e instanceof CancelledError)) this.addBubble("assistant", "配图失败：" + errMsg(e));
       return null;
     } finally {
@@ -605,13 +772,17 @@ export class ChatView extends ItemView {
     const historySnapshot = this.history.map(m => ({ ...m }));
     const sourcesSnapshot = [...this.sources].sort();
     const mermaidSnapshot = this.lastMermaid;
+    const summarySnapshot = this.earlierSummaryFor(SUMMARY_HISTORY_LIMIT);
     let imageSnapshot = this.lastImageEmbed;
 
     if (!this.acquire()) return;
     let title = "", body = "";
     const t = timedNotice("整理成笔记中…");
     try {
-      ({ title, body } = await this.runCancellable(this.plugin.tutor.summarizeNote(historySnapshot)));
+      ({ title, body } = await this.runCancellable(this.plugin.tutor.summarizeNote(historySnapshot, {
+        signal: this.currentSignal(),
+        earlierSummary: summarySnapshot,
+      })));
     } catch (e) {
       if (!(e instanceof CancelledError)) new Notice("整理失败：" + errMsg(e));
       t.stop();
@@ -647,18 +818,17 @@ export class ChatView extends ItemView {
         conversation,
       });
       new Notice("已保存：" + path);
-      // 只消费本次快照用掉的产物。保存弹窗期间若用户继续聊天或重新生成产物，不把新状态误清掉。
-      if (this.lastMermaid === mermaidSnapshot) this.lastMermaid = null;
-      if (this.lastImageEmbed === imageSnapshot) this.lastImageEmbed = null;
-      for (const s of sourcesSnapshot) this.sources.delete(s);
-      // 不变量：这里记录的是「保存后状态」的签名——上面刚把用到的 sources/mermaid/image 都清空了，
-      // 所以紧接着不改动再点「存为笔记」时，顶部 stateSignature() 算出的当前状态与此处一致，命中去重。
-      // 若改了这套清空逻辑，务必同步这里的签名口径，否则去重会失效或误判。
-      this.lastSavedNote = {
-        stateSignature: this.stateSignature(historySnapshot, [], null, null),
+      // 状态消费抽成纯函数 consumeSavedSnapshot（含签名口径不变量说明），便于单测去重逻辑。
+      const consumed = consumeSavedSnapshot(
+        { lastMermaid: this.lastMermaid, lastImageEmbed: this.lastImageEmbed },
+        { history: historySnapshot, sources: sourcesSnapshot, mermaid: mermaidSnapshot, imageEmbed: imageSnapshot },
         path,
-        savedAt: Date.now(),
-      };
+        Date.now(),
+      );
+      this.lastMermaid = consumed.lastMermaid;
+      this.lastImageEmbed = consumed.lastImageEmbed;
+      for (const s of consumed.consumedSources) this.sources.delete(s);
+      this.lastSavedNote = consumed.lastSavedNote;
       this.persistDraft();
     } catch (e) {
       new Notice("保存失败：" + errMsg(e));
@@ -679,6 +849,8 @@ export class ChatView extends ItemView {
     this.lastMermaid = null;
     this.lastImageEmbed = null;
     this.lastSavedNote = null;
+    this.contextSummary = null;
+    this.summaryGen++; // 在途的后台摘要作废，别把旧对话的摘要写回清空后的面板
     this.pendingSourceContexts = [];
     this.inputEl.value = "";
     this.autoGrow();
@@ -688,6 +860,8 @@ export class ChatView extends ItemView {
   }
 
   async onClose(): Promise<void> {
+    // 面板已关：在途的后台摘要作废（其 persistDraft 会以关闭时的旧状态覆盖新面板的草稿）
+    this.summaryGen++;
     // 关闭即把当前草稿落盘：saveChatDraft 走防抖，关闭时强制冲一次，避免丢最后改动
     this.plugin.flushDrafts();
     this.contentEl.empty();

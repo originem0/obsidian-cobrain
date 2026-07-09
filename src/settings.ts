@@ -20,6 +20,7 @@ export interface CobrainSettings {
   attachmentFolder: string;
   indexExcludeFolders: string; // 逗号/换行分隔，重建和自动索引时跳过
   retrievalMinScore: number;   // 检索命中最低相似度，低于此值不展示、不喂模型
+  queryRewriteEnabled: boolean; // 多轮对话时先让文本模型把最新发言改写成自包含检索 query（补全指代）
   noteTags: string;             // 逗号分隔，写入笔记 frontmatter tags
   appendConversation: boolean;  // 存笔记时是否附上你的提问（原始问题，不含 AI 回答）
   conceptMapDirection: string;  // Mermaid 方向：TD / LR
@@ -116,6 +117,7 @@ export const DEFAULT_SETTINGS: CobrainSettings = {
   attachmentFolder: "cobrain-note/附件",
   indexExcludeFolders: DEFAULT_INDEX_EXCLUDE_FOLDERS,
   retrievalMinScore: 0.3,
+  queryRewriteEnabled: true,
   noteTags: "cobrain-note",
   appendConversation: false,
   conceptMapDirection: "TD",
@@ -386,6 +388,15 @@ export class CobrainSettingTab extends PluginSettingTab {
           this.plugin.saveSettingsDebounced();
         });
       });
+    new Setting(body)
+      .setName("多轮检索改写")
+      .setDesc("多轮对话时先让文本模型把最新发言改写成独立检索查询（补全「它/这个」等指代），检索更准，但每轮多一次小请求")
+      .addToggle(t =>
+        t.setValue(s.queryRewriteEnabled).onChange(v => {
+          s.queryRewriteEnabled = v;
+          this.plugin.saveSettingsDebounced();
+        }),
+      );
   }
 
   private renderNoteSection(container: HTMLElement): void {

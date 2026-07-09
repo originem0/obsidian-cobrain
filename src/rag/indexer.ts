@@ -8,6 +8,9 @@ import type { CobrainSettings } from "../settings";
 
 export type IndexFileResult = "saved" | "removed" | "unchanged";
 export interface IndexFailure { path: string; message: string; at: number; }
+
+// 全量重建的文件间并发度：4 路在「明显快于串行」与「不打爆嵌入端点限流」之间取平衡
+export const REINDEX_CONCURRENCY = 4;
 export interface IndexStatus {
   running: boolean;
   lastChangedAt: number | null;
@@ -111,6 +114,9 @@ export class Indexer {
   }
 
   // 全量：跳过 mtime 未变的文件；删除已不存在文件的分片；每篇即时落分片(崩溃不丢进度)，结束写 meta + 清孤儿。
+  // 文件间并发跑（REINDEX_CONCURRENCY 路 worker 抢同一个队列）：重建耗时主要是逐篇打嵌入 API 的网络往返，
+  // 并发后墙钟时间约缩为 1/N。安全性：不同 worker 处理不同 path，store 的增删是同步操作、
+  // 分片文件按 path 哈希隔离，互不相踩；并发度压在 4，避免打爆嵌入端点的限流。
   async reindexAll(persist: IndexStore, embedModel: string, opts: { force?: boolean } = {}): Promise<void> {
     if (this.running) { new Notice("索引正在进行中，请稍候…"); return; }
     this.running = true;
@@ -121,9 +127,12 @@ export class Indexer {
     }
     let done = 0;
     let failed = 0;
+    let cursor = 0;
     const notice = new Notice("索引中… 0/" + files.length, 0);
-    try {
-      for (const f of files) {
+    const worker = async (): Promise<void> => {
+      for (;;) {
+        const f = files[cursor++];
+        if (!f) return;
         if (opts.force || this.store.getMtime(f.path) !== f.stat.mtime) {
           try {
             await this.indexFile(f, persist, opts.force === true);
@@ -139,6 +148,11 @@ export class Indexer {
         done++;
         notice.setMessage(`索引中… ${done}/${files.length}`);
       }
+    };
+    try {
+      await Promise.all(
+        Array.from({ length: Math.min(REINDEX_CONCURRENCY, files.length) }, () => worker()),
+      );
       await persist.finalize(embedModel);
       this.lastFullReindexAt = Date.now();
       new Notice(

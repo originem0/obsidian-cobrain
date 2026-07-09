@@ -24,6 +24,8 @@
 .cobrain-bubble-user { background: var(--background-secondary); }
 .cobrain-bubble-ai { background: var(--background-primary-alt); }
 .cobrain-who { font-size: 0.7em; color: var(--text-faint); margin-bottom: 4px; }
+/* 流式增量阶段的纯文本（完成后整体换成 Markdown 渲染）：保留换行，避免长词撑破气泡 */
+.cobrain-stream { white-space: pre-wrap; word-break: break-word; line-height: 1.55; }
 .cobrain-srcline { font-size: 0.7em; color: var(--text-faint); margin-top: 6px; }
 .cobrain-related { margin: 8px 0; padding: 6px 10px; border-left: 2px solid var(--interactive-accent); background: var(--background-secondary); border-radius: 4px; }
 .cobrain-related-head { font-size: 0.7em; color: var(--text-muted); margin-bottom: 4px; }

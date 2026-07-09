@@ -20,12 +20,19 @@ export interface SavedNoteState {
   savedAt: number;
 }
 
+// 滚动摘要：text = 已滑出模型窗口的旧消息的摘要；coveredCount = 摘要已覆盖到 history 的第几条（不含）。
+export interface ContextSummaryState {
+  text: string;
+  coveredCount: number;
+}
+
 export interface ChatDraft {
   history: ChatMsg[];
   sources: string[];
   lastMermaid: string | null;
   lastImageEmbed: string | null;
   lastSavedNote: SavedNoteState | null;
+  contextSummary: ContextSummaryState | null;
   savedAt: number;
 }
 
@@ -63,12 +70,27 @@ export function normalizeChatDrafts(raw: unknown): Record<number, ChatDraft> {
           savedAt: (rawLastSaved as Record<string, unknown>).savedAt as number,
         }
         : null;
+    const rawSummary = obj.contextSummary;
+    const summaryText =
+      rawSummary && typeof rawSummary === "object" && typeof (rawSummary as Record<string, unknown>).text === "string"
+        ? ((rawSummary as Record<string, unknown>).text as string).trim()
+        : "";
+    const summaryCovered =
+      rawSummary && typeof rawSummary === "object" ? (rawSummary as Record<string, unknown>).coveredCount : undefined;
+    // history 超 80 截断时，coveredCount 按同样的偏移平移（saveChatDraft 落盘时已做，这里防手改 data.json 再兜一次）
+    const kept = history.slice(-80);
+    const droppedCount = history.length - kept.length;
+    const contextSummary: ContextSummaryState | null =
+      summaryText && typeof summaryCovered === "number" && Number.isInteger(summaryCovered) && summaryCovered >= 0
+        ? { text: summaryText, coveredCount: Math.min(Math.max(0, summaryCovered - droppedCount), kept.length) }
+        : null;
     out[id] = {
-      history: history.slice(-80),
+      history: kept,
       sources: Array.isArray(obj.sources) ? obj.sources.filter((v): v is string => typeof v === "string").slice(0, 80) : [],
       lastMermaid: typeof obj.lastMermaid === "string" ? obj.lastMermaid : null,
       lastImageEmbed: typeof obj.lastImageEmbed === "string" ? obj.lastImageEmbed : null,
       lastSavedNote,
+      contextSummary,
       savedAt: typeof obj.savedAt === "number" && Number.isFinite(obj.savedAt) ? obj.savedAt : Date.now(),
     };
   }
@@ -304,18 +326,26 @@ export default class CobrainPlugin extends Plugin {
     this.saveDraftsDebounced();
   }
 
-  // 强制把草稿(及设置)立刻落盘，绕过防抖。面板关闭(onClose)/插件卸载(onunload)时调用。
+  // 强制把草稿(及设置)立刻落盘：先取消仍在防抖窗口里的回调再写，避免「冲一次之后防抖又多写一次」。
+  // 面板关闭(onClose)/插件卸载(onunload)时调用。
   flushDrafts(): void {
+    this.saveDraftsDebounced.cancel();
+    this.saveSettingsDebounced.cancel();
     void this.saveSettings();
   }
 
   saveChatDraft(id: number, draft: Omit<ChatDraft, "savedAt">): void {
     if (!draft.history.length) delete this.chatDrafts[id];
     else {
+      // history 截到最近 80 条时，摘要的 coveredCount 要按被丢弃的条数平移，否则恢复后覆盖边界错位
+      const dropped = Math.max(0, draft.history.length - 80);
       this.chatDrafts[id] = {
         ...draft,
         history: draft.history.slice(-80),
         sources: draft.sources.slice(0, 80),
+        contextSummary: draft.contextSummary
+          ? { text: draft.contextSummary.text, coveredCount: Math.max(0, draft.contextSummary.coveredCount - dropped) }
+          : null,
         savedAt: Date.now(),
       };
     }
