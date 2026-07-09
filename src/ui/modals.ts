@@ -1,7 +1,7 @@
 import { App, Modal } from "obsidian";
 
 // 把回调式 Modal 包成 Promise：done 守卫避免重复 resolve；覆写 onClose 兜底「关闭未提交=取消」。
-// 五处 askX 共用，消除原先复制五遍的样板。
+// 多处 askX 共用，消除原先复制多遍的样板。
 export function openModal<T>(make: (finish: (v: T) => void) => Modal, onCancel: T): Promise<T> {
   return new Promise(resolve => {
     let done = false;
@@ -21,23 +21,26 @@ export function askTextArea(app: App, title: string, initial: string): Promise<s
   return openModal<string | null>(finish => new TextAreaModal(app, title, initial, v => finish(v || null)), null);
 }
 
-export function askConfirm(app: App, title: string, message: string): Promise<boolean> {
-  return openModal<boolean>(finish => new ConfirmModal(app, title, message, finish), false);
+// okText：确认键文案跟随动作（删除/清空/确定…），别让「清空对话」的确认键写着「删除」。
+export function askConfirm(app: App, title: string, message: string, okText = "确定"): Promise<boolean> {
+  return openModal<boolean>(finish => new ConfirmModal(app, title, message, okText, finish), false);
+}
+
+export interface SaveOptions {
+  title: string;
+  append: boolean;
+  image: boolean;
 }
 
 export function askSaveOptions(
   app: App,
   title: string,
   defaults: { append: boolean; hasImage: boolean },
-): Promise<{ append: boolean; image: boolean } | null> {
-  return openModal<{ append: boolean; image: boolean } | null>(
+): Promise<SaveOptions | null> {
+  return openModal<SaveOptions | null>(
     finish => new SaveOptionsModal(app, title, defaults, finish),
     null,
   );
-}
-
-export function askDraftChoice(app: App, id: number): Promise<"restore" | "new" | null> {
-  return openModal<"restore" | "new" | null>(finish => new DraftChoiceModal(app, id, finish), null);
 }
 
 class PromptModal extends Modal {
@@ -104,6 +107,7 @@ class ConfirmModal extends Modal {
     app: App,
     private titleText: string,
     private message: string,
+    private okText: string,
     private onPick: (v: boolean) => void,
   ) {
     super(app);
@@ -114,7 +118,7 @@ class ConfirmModal extends Modal {
     const row = this.contentEl.createDiv();
     row.setCssStyles({ display: "flex", gap: "8px", justifyContent: "flex-end", marginTop: "12px" });
     const cancel = row.createEl("button", { text: "取消" });
-    const ok = row.createEl("button", { text: "删除" });
+    const ok = row.createEl("button", { text: this.okText });
     ok.classList.add("mod-warning");
     cancel.onclick = () => { this.onPick(false); this.close(); };
     ok.onclick = () => { this.onPick(true); this.close(); };
@@ -124,22 +128,26 @@ class ConfirmModal extends Modal {
   }
 }
 
-// 存为笔记的选项框：附提问原文（默认随全局设置） + 配图（默认关）。
-// 按钮先回调再 close，避免与 onClose 的兜底重复 resolve。
+// 存为笔记的选项框：标题可编辑（LLM 起的标题不满意就地改，别让用户保存后再改文件名）
+// + 附提问原文（默认随全局设置） + 配图（默认关）。按钮先回调再 close，避免与 onClose 的兜底重复 resolve。
 class SaveOptionsModal extends Modal {
   constructor(
     app: App,
     private noteTitle: string,
     private defaults: { append: boolean; hasImage: boolean },
-    private onPick: (v: { append: boolean; image: boolean } | null) => void,
+    private onPick: (v: SaveOptions | null) => void,
   ) {
     super(app);
   }
   onOpen(): void {
-    this.contentEl.createEl("h3", { text: `存为笔记：「${this.noteTitle}」` });
+    this.contentEl.createEl("h3", { text: "存为笔记" });
 
     let append = this.defaults.append;
     let image = false;
+
+    const titleInput = this.contentEl.createEl("input", { type: "text", value: this.noteTitle });
+    titleInput.setCssStyles({ width: "100%", marginBottom: "4px" });
+    titleInput.setAttribute("placeholder", "笔记标题");
 
     const mkCheck = (label: string, initial: boolean, onChange: (v: boolean) => void): void => {
       const row = this.contentEl.createDiv();
@@ -155,40 +163,24 @@ class SaveOptionsModal extends Modal {
     mkCheck("附上我的提问原文", append, v => (append = v));
     mkCheck("为这篇配一张隐喻图（基于标题）", image, v => (image = v));
 
+    const submit = () => {
+      // 标题被清空按取消编辑处理，回退 LLM 标题，不产出空文件名
+      this.onPick({ title: titleInput.value.trim() || this.noteTitle, append, image });
+      this.close();
+    };
+    titleInput.addEventListener("keydown", e => {
+      if (e.key === "Enter") submit();
+    });
+
     const row = this.contentEl.createDiv();
     row.setCssStyles({ display: "flex", gap: "8px", justifyContent: "flex-end", marginTop: "12px" });
     const cancel = row.createEl("button", { text: "取消" });
     const save = row.createEl("button", { text: "保存" });
     save.classList.add("mod-cta");
     cancel.onclick = () => { this.onPick(null); this.close(); };
-    save.onclick = () => { this.onPick({ append, image }); this.close(); };
+    save.onclick = submit;
   }
   onClose(): void {
     this.contentEl.empty();
   }
-}
-
-// 打开已有草稿的槽位时询问：恢复 / 新建 / 取消。
-class DraftChoiceModal extends Modal {
-  constructor(
-    app: App,
-    private id: number,
-    private onPick: (v: "restore" | "new" | null) => void,
-  ) { super(app); }
-
-  onOpen() {
-    this.contentEl.createEl("h3", { text: `创作副脑 #${this.id} 有未结束草稿` });
-    this.contentEl.createEl("p", { text: "恢复会继续上次对话。新建会清空这个槽位的草稿。" });
-    const row = this.contentEl.createDiv();
-    row.setCssStyles({ display: "flex", gap: "8px", justifyContent: "flex-end", marginTop: "12px", flexWrap: "wrap" });
-    const cancel = row.createEl("button", { text: "取消" });
-    const fresh = row.createEl("button", { text: "新建空对话" });
-    const restore = row.createEl("button", { text: "恢复草稿" });
-    restore.classList.add("mod-cta");
-    cancel.onclick = () => { this.onPick(null); this.close(); };
-    fresh.onclick = () => { this.onPick("new"); this.close(); };
-    restore.onclick = () => { this.onPick("restore"); this.close(); };
-  }
-
-  onClose() { this.contentEl.empty(); }
 }

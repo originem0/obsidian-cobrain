@@ -5,6 +5,9 @@
    这里显式放开消息区，让用户能选中副脑回复 / 自己的提问并 Ctrl+C 复制。 */
 .cobrain-messages, .cobrain-messages * { -webkit-user-select: text; user-select: text; }
 .cobrain-welcome { color: var(--text-muted); padding: 6px 4px 10px; font-size: 0.88em; line-height: 1.5; }
+/* 空状态行动按钮：文案指路不如按钮直达（打开设置 / 重建索引） */
+.cobrain-welcome-actions { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+.cobrain-welcome-actions button { font-size: 0.82em; padding: 2px 10px; }
 .cobrain-restored, .cobrain-context-limit {
   color: var(--text-muted);
   background: var(--background-secondary);
@@ -15,20 +18,45 @@
   font-size: 0.82em;
   line-height: 1.45;
 }
-.cobrain-context-limit { border-left-color: var(--text-warning); }
+/* 提示条在消息区外（输入区上方，始终可见），补左右留白对齐消息区内容 */
+.cobrain-context-limit { border-left-color: var(--text-warning); margin: 0 10px 6px; }
+/* 「已恢复草稿」行内的轻操作（新建对话） */
+.cobrain-inline-action { margin-left: 8px; cursor: pointer; white-space: nowrap; }
+/* 保存闭环：消息流里可点开的「已保存笔记」行 */
+.cobrain-saved-line {
+  color: var(--text-muted);
+  background: var(--background-secondary);
+  border-left: 2px solid var(--text-success);
+  border-radius: 4px;
+  padding: 6px 8px;
+  margin: 6px 0;
+  font-size: 0.82em;
+  line-height: 1.45;
+}
+.cobrain-saved-line a { cursor: pointer; }
+/* 检索空命中的弱提示 */
+.cobrain-nohit { color: var(--text-faint); font-size: 0.75em; margin: 6px 0 2px; }
 .cobrain-bar { display: flex; gap: 6px; padding: 6px 10px; flex-wrap: wrap; border-top: 1px solid var(--background-modifier-border); }
 .cobrain-bar button { font-size: 0.82em; padding: 2px 10px; }
 .cobrain-inputrow { display: flex; gap: 6px; padding: 8px 10px; border-top: 1px solid var(--background-modifier-border); align-items: flex-end; }
 .cobrain-input { flex: 1; resize: none; min-height: 2.2em; max-height: 40vh; overflow-y: auto; }
 .cobrain-bubble { margin: 8px 0; padding: 8px 10px; border-radius: 8px; }
-.cobrain-bubble-user { background: var(--background-secondary); }
+/* 用户气泡加 accent 边：很多主题里 secondary 与 primary-alt 几乎同色，只靠底色分不出谁在说话 */
+.cobrain-bubble-user { background: var(--background-secondary); border-left: 2px solid var(--interactive-accent); }
 .cobrain-bubble-ai { background: var(--background-primary-alt); }
-.cobrain-who { font-size: 0.7em; color: var(--text-faint); margin-bottom: 4px; }
+.cobrain-who { font-size: 0.7em; color: var(--text-faint); margin-bottom: 4px; display: flex; justify-content: space-between; align-items: center; }
+/* AI 气泡右上角「复制」：恒显低透明（移动端没有 hover），悬停提亮 */
+.cobrain-copy { cursor: pointer; color: var(--text-faint); opacity: 0.55; }
+.cobrain-copy:hover { opacity: 1; color: var(--text-accent); }
 /* 流式增量阶段的纯文本（完成后整体换成 Markdown 渲染）：保留换行，避免长词撑破气泡 */
 .cobrain-stream { white-space: pre-wrap; word-break: break-word; line-height: 1.55; }
 .cobrain-srcline { font-size: 0.7em; color: var(--text-faint); margin-top: 6px; }
 .cobrain-related { margin: 8px 0; padding: 6px 10px; border-left: 2px solid var(--interactive-accent); background: var(--background-secondary); border-radius: 4px; }
-.cobrain-related-head { font-size: 0.7em; color: var(--text-muted); margin-bottom: 4px; }
+.cobrain-related-head { font-size: 0.7em; color: var(--text-muted); margin-bottom: 4px; cursor: pointer; user-select: none; -webkit-user-select: none; }
+/* 折叠态：只留头部一行（新一轮相关块出现时旧块自动折叠，点头部可展开） */
+.cobrain-related.is-collapsed .cobrain-related-item { display: none; }
+.cobrain-related.is-collapsed { opacity: 0.75; }
+.cobrain-related.is-collapsed .cobrain-related-head { margin-bottom: 0; }
 .cobrain-related-item { margin: 4px 0; cursor: pointer; }
 .cobrain-related-title { font-size: 0.85em; color: var(--text-accent); }
 .cobrain-related-snippet { font-size: 0.78em; color: var(--text-faint); }

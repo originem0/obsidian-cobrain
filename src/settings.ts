@@ -230,8 +230,32 @@ export class CobrainSettingTab extends PluginSettingTab {
       });
     }
 
+    if (opts.kind !== "chat") {
+      // 多数用户三套端点是同一个代理：一键复用文本端点的 URL/Key，砍掉重复粘贴（模型仍需单独检测选择）
+      new Setting(body)
+        .setName("复用文本端点")
+        .setDesc("把文本 LLM 的 Base URL 和 API Key 复制过来，模型仍需单独「检测」选择")
+        .addButton(b =>
+          b.setButtonText("复制过来").onClick(() => {
+            if (!s.llmBaseUrl && !s.llmKey) {
+              new Notice("文本 LLM 端点还没配置");
+              return;
+            }
+            (s[opts.urlKey] as string) = s.llmBaseUrl;
+            (s[opts.keyKey] as string) = s.llmKey;
+            this.status[opts.kind] = { state: "untested" };
+            // 端点已换，旧检测列表作废
+            if (opts.kind === "embed") this.detected.embed = [];
+            else this.detected[opts.kind] = [];
+            this.plugin.saveSettingsDebounced();
+            new Notice("已复制文本端点的 URL 和 Key");
+            this.display(); // 整页重绘刷新输入框显示值（显式按钮操作，失焦可接受）
+          }),
+        );
+    }
+
     this.text(body, "Base URL", "OpenAI 兼容端点", opts.urlKey, "", opts.kind);
-    this.text(body, "API Key", "仅存本地，不入库", opts.keyKey, "sk-...", opts.kind);
+    this.secretText(body, "API Key", "仅存本地，不入库", opts.keyKey, "sk-...", opts.kind);
 
     const detectedOptions = this.modelOptions(opts.kind, s[opts.modelKey]);
     new Setting(body)
@@ -378,7 +402,8 @@ export class CobrainSettingTab extends PluginSettingTab {
     this.textArea(body, "排除目录", "逗号或换行分隔；隐藏目录始终跳过", "indexExcludeFolders");
     new Setting(body)
       .setName("检索最低分")
-      .setDesc("低于该相似度的命中不展示，也不喂给模型")
+      .setDesc("低于该相似度的命中不展示，也不喂给模型。用「测试检索」看真实分数分布，再决定卡多少")
+      .addButton(b => b.setButtonText("测试检索").onClick(() => this.plugin.openRetrievalTest()))
       .addSlider(slider => {
         slider.setLimits(0, 1, 0.01);
         slider.setValue(s.retrievalMinScore);
@@ -447,6 +472,37 @@ export class CobrainSettingTab extends PluginSettingTab {
     );
   }
 
+  // API Key 输入：密码态显示 + 眼睛按钮切换。设置页截屏/共享屏幕时不再裸奔明文密钥。
+  private secretText(parent: HTMLElement, name: string, desc: string, key: StringKeys, ph = "", resetStatus?: EndpointKind): void {
+    const s = this.plugin.settings;
+    let inputEl: HTMLInputElement | null = null;
+    new Setting(parent)
+      .setName(name)
+      .setDesc(desc)
+      .addText(t => {
+        inputEl = t.inputEl;
+        t.inputEl.type = "password";
+        t.setPlaceholder(ph).setValue(s[key]).onChange(v => {
+          s[key] = v.trim();
+          if (resetStatus) {
+            this.status[resetStatus] = { state: "untested" };
+            if (resetStatus === "embed") this.detected.embed = [];
+            else this.detected[resetStatus] = [];
+            const el = this.statusEls[resetStatus];
+            if (el) this.paintStatus(el, this.status[resetStatus]);
+            this.refreshModelDropdown(resetStatus);
+          }
+          this.plugin.saveSettingsDebounced();
+        });
+      })
+      .addExtraButton(b =>
+        b.setIcon("eye").setTooltip("显示 / 隐藏").onClick(() => {
+          if (!inputEl) return;
+          inputEl.type = inputEl.type === "password" ? "text" : "password";
+        }),
+      );
+  }
+
   // 提示词等多行文本：不 trim（保留换行/缩进）
   private textArea(parent: HTMLElement, name: string, desc: string, key: StringKeys): void {
     const s = this.plugin.settings;
@@ -472,8 +528,9 @@ export class CobrainSettingTab extends PluginSettingTab {
           s[key] = v;
           this.plugin.saveSettingsDebounced();
         });
-        t.inputEl.rows = 6;
-        t.inputEl.setCssStyles({ width: "100%" });
+        // 人设提示词动辄几百字，6 行的编辑窗口是在惩罚认真调提示词的用户
+        t.inputEl.rows = 14;
+        t.inputEl.setCssStyles({ width: "100%", resize: "vertical" });
       })
       .addButton(b =>
         b.setButtonText("恢复默认").onClick(async () => {

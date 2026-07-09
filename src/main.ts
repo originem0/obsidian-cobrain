@@ -12,7 +12,6 @@ import { ImageClient } from "./llm/imageClient";
 import { buildQuote, findHeadingAbove, extractContext } from "./util/quote";
 import { IndexStore } from "./rag/indexStore";
 import type { IndexFailure } from "./rag/indexer";
-import { askDraftChoice } from "./ui/modals";
 
 export interface SavedNoteState {
   stateSignature: string;
@@ -36,7 +35,7 @@ export interface ChatDraft {
   savedAt: number;
 }
 
-// askDraftChoice 与 DraftChoiceModal 已抽到 ./ui/modals。
+// 弹窗类（askPrompt/askConfirm/askSaveOptions 等）在 ./ui/modals。
 
 export function normalizeChatDrafts(raw: unknown): Record<number, ChatDraft> {
   const out: Record<number, ChatDraft> = {};
@@ -157,28 +156,29 @@ export default class CobrainPlugin extends Plugin {
         }));
       }
     });
-    this.addRibbonIcon("brain", "创作副脑", () => void this.openNewChatView());
+    this.addRibbonIcon("brain", "创作副脑", () => void this.revealOrOpenChatView());
     this.addCommand({
       id: "open-tutor",
       name: "打开创作副脑",
+      callback: () => void this.revealOrOpenChatView(),
+    });
+
+    this.addCommand({
+      id: "open-new-chat",
+      name: "新开一个对话面板",
       callback: () => void this.openNewChatView(),
     });
 
     this.addCommand({
       id: "reindex",
       name: "重建索引",
-      callback: async () => {
-        // 移动端为只读检索：不重建（避免蜂窝网重嵌 + 改写索引引发同步冲突），索引在桌面端建。
-        if (Platform.isMobile) { new Notice("移动端为只读检索，索引请在桌面端重建"); return; }
-        await this.indexReady; // 别在索引还没加载完时就重建（否则会把所有文件当"新文件"全量重嵌）
-        void this.enqueueIndexOperation(() => this.indexer.reindexAll(this.indexStore, this.settings.embedModel, { force: true }));
-      },
+      callback: () => void this.rebuildIndex(),
     });
 
     this.addCommand({
       id: "test-retrieval",
       name: "测试检索",
-      callback: () => new QueryModal(this.app, (q) => void this.showRetrieval(q)).open(),
+      callback: () => this.openRetrievalTest(),
     });
 
     this.addCommand({
@@ -296,9 +296,43 @@ export default class CobrainPlugin extends Plugin {
     if (missingEmbed) return `${missingEmbed} 现在只能普通对话，不能翻旧笔记。`;
     if (!this.indexLoaded) return "索引正在加载。现在可以先普通对话，加载完后会检索旧笔记。";
     if (this.store.allPaths().length === 0) {
-      return "索引还是空的。先运行「Cobrain: 重建索引」，否则我翻不出你写过的旧笔记。";
+      // 移动端只读：跑「重建索引」只会得到「请在桌面端重建」，别把用户指进死路
+      return Platform.isMobile
+        ? "索引还是空的。请先在桌面端运行「Cobrain: 重建索引」，索引会随 vault 同步到本设备。"
+        : "索引还是空的。先运行「Cobrain: 重建索引」，否则我翻不出你写过的旧笔记。";
     }
     return "聊你正在想的。我会翻出你写过的相关旧笔记，并回抛问题逼你自己想。下方：概念图 / 推敲 / 配图 / 存为笔记。";
+  }
+
+  // 空状态该给哪些行动按钮（chatView 的 welcome 区渲染）：文案指路不如按钮直达。
+  welcomeActions(): { openSettings: boolean; rebuildIndex: boolean } {
+    const configMissing = !!(this.chatConfigProblem() || this.embedConfigProblem());
+    const rebuild =
+      !Platform.isMobile && !configMissing && this.indexLoaded && this.store.allPaths().length === 0;
+    return { openSettings: configMissing, rebuildIndex: rebuild };
+  }
+
+  // 直达本插件设置页。app.setting 是未公开 API，社区插件通行做法（typings 里没有，运行时稳定存在）。
+  openPluginSettings(): void {
+    const setting = (this.app as unknown as {
+      setting?: { open(): void; openTabById(id: string): void };
+    }).setting;
+    if (!setting) { new Notice("请在 设置 → 第三方插件 → Cobrain 中配置"); return; }
+    setting.open();
+    setting.openTabById(this.manifest.id);
+  }
+
+  // 全量重建索引：命令、welcome 空状态按钮共用。
+  async rebuildIndex(): Promise<void> {
+    // 移动端为只读检索：不重建（避免蜂窝网重嵌 + 改写索引引发同步冲突），索引在桌面端建。
+    if (Platform.isMobile) { new Notice("移动端为只读检索，索引请在桌面端重建"); return; }
+    await this.indexReady; // 别在索引还没加载完时就重建（否则会把所有文件当"新文件"全量重嵌）
+    void this.enqueueIndexOperation(() => this.indexer.reindexAll(this.indexStore, this.settings.embedModel, { force: true }));
+  }
+
+  // 检索校准入口：命令、设置页「检索最低分」旁的按钮共用。
+  openRetrievalTest(): void {
+    new QueryModal(this.app, (q) => void this.showRetrieval(q)).open();
   }
 
   whenIndexReady(): Promise<void> {
@@ -385,7 +419,21 @@ export default class CobrainPlugin extends Plugin {
     );
   }
 
-  // 打开新的对话窗口（最多 3 个）
+  // Ribbon / 主命令：优先聚焦已打开的面板——用户点脑子图标的心智是「打开我的对话」，
+  // 不是「再开一个」。反复点击不再攒出 #2、#3 面板；要多开走「新开一个对话面板」命令。
+  async revealOrOpenChatView(): Promise<void> {
+    for (let i = 1; i <= this.MAX_VIEWS; i++) {
+      const leaves = this.app.workspace.getLeavesOfType(`${VIEW_TYPE_COBRAIN_CHAT}-${i}`);
+      if (leaves.length > 0) {
+        await this.app.workspace.revealLeaf(leaves[0]);
+        return;
+      }
+    }
+    await this.openNewChatView();
+  }
+
+  // 打开新的对话窗口（最多 3 个）。有草稿的槽位直接恢复（onOpen 内完成），
+  // 不再弹「恢复/新建」拦路：点开面板的意图 90% 是继续，想重来用面板里的「新建」/「清空」。
   async openNewChatView(): Promise<void> {
     const activeIds = this.getActiveViewIdsFromWorkspace();
     // 找第一个未使用的 ID
@@ -400,12 +448,6 @@ export default class CobrainPlugin extends Plugin {
     if (freeId === 0) {
       new Notice(`最多同时打开 ${this.MAX_VIEWS} 个对话窗口`);
       return;
-    }
-
-    if (this.chatDrafts[freeId]) {
-      const choice = await askDraftChoice(this.app, freeId);
-      if (!choice) return;
-      if (choice === "new") this.clearChatDraft(freeId);
     }
 
     const viewType = `${VIEW_TYPE_COBRAIN_CHAT}-${freeId}`;
