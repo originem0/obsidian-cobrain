@@ -178,6 +178,11 @@ export class ChatView extends ItemView {
     this.makeBtn(bar, "推敲", () => void this.doCritique());
     this.makeBtn(bar, "配图", () => void this.doImage());
     this.saveNoteBtn = this.makeBtn(bar, "存为笔记", () => void this.doSaveNote());
+    // 会话管理，与「对话产物」按钮分开：「新会话」开一个独立的新面板，是面板级操作、
+    // 与当前对话状态无关，故不走 makeBtn（那些会随 busy / 无历史被禁用）——始终可点。
+    const newBtn = bar.createEl("button", { text: "＋ 新会话", cls: "cobrain-new-session" });
+    newBtn.setAttribute("title", "再开一个独立的副脑对话面板（最多 3 个）");
+    newBtn.onclick = () => void this.plugin.openNewChatView();
     this.makeBtn(bar, "清空", () => void this.doClearDraft());
 
     const iw = root.createDiv({ cls: "cobrain-inputrow" });
@@ -241,12 +246,13 @@ export class ChatView extends ItemView {
     }
   }
 
-  // 「已恢复草稿」提示行 + 轻量「新建对话」入口：恢复是默认路径（打开面板零打断），
-  // 想重来的人在这里点新建（走清空确认，防误删草稿）。取代原先打开面板时的拦路三选弹窗。
+  // 「已恢复草稿」提示行 + 就近的「清空重来」入口：恢复是默认路径（打开面板零打断）。
+  // 措辞是「清空重来」而非「新建对话」——它清的是当前面板的草稿，不是开新面板（那走按钮栏「新会话」），
+  // 避免用户把它误当多开入口。走清空确认，防误删草稿。
   private addRestoredLine(): void {
     const line = this.messagesEl.createDiv({ cls: "cobrain-restored" });
     line.createSpan({ text: "已恢复上次未关闭的对话草稿。" });
-    const fresh = line.createEl("a", { text: "新建对话", cls: "cobrain-inline-action" });
+    const fresh = line.createEl("a", { text: "清空重来", cls: "cobrain-inline-action" });
     fresh.onclick = () => void this.doClearDraft();
   }
 

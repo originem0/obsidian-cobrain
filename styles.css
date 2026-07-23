@@ -38,6 +38,8 @@
 .cobrain-nohit { color: var(--text-faint); font-size: 0.75em; margin: 6px 0 2px; }
 .cobrain-bar { display: flex; gap: 6px; padding: 6px 10px; flex-wrap: wrap; border-top: 1px solid var(--background-modifier-border); }
 .cobrain-bar button { font-size: 0.82em; padding: 2px 10px; }
+/* 「新会话」是常驻的多开入口，从对话产物按钮里跳出来（accent 描边），别再让用户找不到 */
+.cobrain-new-session { border-color: var(--interactive-accent) !important; color: var(--text-accent); font-weight: 600; }
 .cobrain-inputrow { display: flex; gap: 6px; padding: 8px 10px; border-top: 1px solid var(--background-modifier-border); align-items: flex-end; }
 .cobrain-input { flex: 1; resize: none; min-height: 2.2em; max-height: 40vh; overflow-y: auto; }
 .cobrain-bubble { margin: 8px 0; padding: 8px 10px; border-radius: 8px; }
