@@ -148,6 +148,10 @@ export class ChatView extends ItemView {
     root.empty();
     root.addClass("cobrain-root");
 
+    // 标签页标题栏的「新开对话」入口：ribbon / 主命令是聚焦优先（避免反复点误开攒面板），
+    // 但「并行多开」是用户会主动要的能力，需要一个显眼入口，否则只剩命令面板、发现不了。
+    this.addAction("plus", "新开一个副脑对话", () => void this.plugin.openNewChatView());
+
     this.messagesEl = root.createDiv({ cls: "cobrain-messages" });
     this.renderWelcome();
 

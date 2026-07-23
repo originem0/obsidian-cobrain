@@ -1,7 +1,7 @@
 {
   "id": "cobrain",
   "name": "Cobrain",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "minAppVersion": "1.5.7",
   "description": "面向创作者的 Obsidian AI 副脑：自动找出 vault 相关旧笔记，由可定制人设的 AI 追问、推敲、组织思路。",
   "author": "samsara",
