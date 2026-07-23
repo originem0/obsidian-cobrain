@@ -148,9 +148,9 @@ export class ChatView extends ItemView {
     root.empty();
     root.addClass("cobrain-root");
 
-    // 标签页标题栏的「新开对话」入口：ribbon / 主命令是聚焦优先（避免反复点误开攒面板），
-    // 但「并行多开」是用户会主动要的能力，需要一个显眼入口，否则只剩命令面板、发现不了。
-    this.addAction("plus", "新开一个副脑对话", () => void this.plugin.openNewChatView());
+    // 会话管理放标题栏图标区（顶部，不占对话正文）：清空当前对话——低频操作，不值得占正文常驻位。
+    // 「新会话」是主动高频操作，放输入行更显眼、也不占正文（见下），不再塞进底部按钮栏挤占正文。
+    this.addAction("trash", "清空当前对话", () => void this.doClearDraft());
 
     this.messagesEl = root.createDiv({ cls: "cobrain-messages" });
     this.renderWelcome();
@@ -173,23 +173,25 @@ export class ChatView extends ItemView {
     // 截断/摘要提示放输入区上方而非消息流顶部：长对话时消息流顶部永远滚出视野，提示形同虚设
     this.contextLimitEl = root.createDiv({ cls: "cobrain-context-limit" });
 
+    // 底部只放「对话产物」四件套（都是对当前对话做什么），安卓端一行放得下、不挤占正文；
+    // 会话管理（新会话 / 清空）不在这里——新会话在输入行、清空在标题栏图标。
     const bar = root.createDiv({ cls: "cobrain-bar" });
     this.makeBtn(bar, "概念图", () => void this.doConceptMap());
     this.makeBtn(bar, "推敲", () => void this.doCritique());
     this.makeBtn(bar, "配图", () => void this.doImage());
     this.saveNoteBtn = this.makeBtn(bar, "存为笔记", () => void this.doSaveNote());
-    // 会话管理，与「对话产物」按钮分开：「新会话」开一个独立的新面板，是面板级操作、
-    // 与当前对话状态无关，故不走 makeBtn（那些会随 busy / 无历史被禁用）——始终可点。
-    const newBtn = bar.createEl("button", { text: "＋ 新会话", cls: "cobrain-new-session" });
-    newBtn.setAttribute("title", "再开一个独立的副脑对话面板（最多 3 个）");
-    newBtn.onclick = () => void this.plugin.openNewChatView();
-    this.makeBtn(bar, "清空", () => void this.doClearDraft());
 
     const iw = root.createDiv({ cls: "cobrain-inputrow" });
     this.inputEl = iw.createEl("textarea", {
       cls: "cobrain-input",
       attr: { rows: "1", placeholder: "问副脑…（Enter 发送，Shift+Enter 换行）" },
     });
+    // 新会话入口放输入行、不放底部按钮栏：安卓端底部一排按钮会 wrap 换行、吃掉对话正文，
+    // 而输入行本就常驻，加个「＋」图标不额外占正文的垂直空间，且和发送键同排、始终显眼。
+    const newSessionBtn = iw.createEl("button", { cls: "cobrain-new-session", text: "＋" });
+    newSessionBtn.setAttribute("aria-label", "新会话");
+    newSessionBtn.setAttribute("title", "新开一个独立的副脑对话面板（最多 3 个）");
+    newSessionBtn.onclick = () => void this.plugin.openNewChatView();
     this.sendBtn = iw.createEl("button", { text: "发送" });
     this.sendBtn.onclick = () => void this.send();
     this.inputEl.addEventListener("input", () => this.autoGrow());
