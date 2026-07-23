@@ -148,10 +148,6 @@ export class ChatView extends ItemView {
     root.empty();
     root.addClass("cobrain-root");
 
-    // 会话管理放标题栏图标区（顶部，不占对话正文）：清空当前对话——低频操作，不值得占正文常驻位。
-    // 「新会话」是主动高频操作，放输入行更显眼、也不占正文（见下），不再塞进底部按钮栏挤占正文。
-    this.addAction("trash", "清空当前对话", () => void this.doClearDraft());
-
     this.messagesEl = root.createDiv({ cls: "cobrain-messages" });
     this.renderWelcome();
 
@@ -173,13 +169,14 @@ export class ChatView extends ItemView {
     // 截断/摘要提示放输入区上方而非消息流顶部：长对话时消息流顶部永远滚出视野，提示形同虚设
     this.contextLimitEl = root.createDiv({ cls: "cobrain-context-limit" });
 
-    // 底部只放「对话产物」四件套（都是对当前对话做什么），安卓端一行放得下、不挤占正文；
-    // 会话管理（新会话 / 清空）不在这里——新会话在输入行、清空在标题栏图标。
+    // 底部：对话产物四件套 + 清空（放回底部按钮栏）。新会话不在这里——它在输入行的「＋」，
+    // 这样只多一个「清空」，仍比早先「新会话+清空」两个都塞底部省一格正文。
     const bar = root.createDiv({ cls: "cobrain-bar" });
     this.makeBtn(bar, "概念图", () => void this.doConceptMap());
     this.makeBtn(bar, "推敲", () => void this.doCritique());
     this.makeBtn(bar, "配图", () => void this.doImage());
     this.saveNoteBtn = this.makeBtn(bar, "存为笔记", () => void this.doSaveNote());
+    this.makeBtn(bar, "清空", () => void this.doClearDraft());
 
     const iw = root.createDiv({ cls: "cobrain-inputrow" });
     this.inputEl = iw.createEl("textarea", {
