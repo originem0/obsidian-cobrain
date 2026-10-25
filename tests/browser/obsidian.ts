@@ -38,9 +38,66 @@ export class TFile {
 export class TFolder {}
 export class WorkspaceLeaf {}
 export class App {}
-export class PluginSettingTab {}
-export class Setting {}
-export class DropdownComponent {}
+export class PluginSettingTab {
+  containerEl = create(document.createElement("div"), "div", { cls: "vertical-tab-content" });
+  constructor(public app: any, public plugin: any) {}
+}
+class TextComponent {
+  inputEl: HTMLInputElement | HTMLTextAreaElement;
+  constructor(parent: HTMLElement, textarea = false) { this.inputEl = create(parent, textarea ? "textarea" : "input") as any; }
+  setValue(value: string) { this.inputEl.value = value; return this; }
+  setPlaceholder(value: string) { this.inputEl.placeholder = value; return this; }
+  onChange(callback: (value: string) => void) { this.inputEl.oninput = () => callback(this.inputEl.value); return this; }
+}
+class ButtonComponent {
+  buttonEl: HTMLButtonElement;
+  constructor(parent: HTMLElement) { this.buttonEl = create(parent, "button") as HTMLButtonElement; }
+  setButtonText(text: string) { this.buttonEl.textContent = text; return this; }
+  setDisabled(value: boolean) { this.buttonEl.disabled = value; return this; }
+  setIcon(icon: string) { setIcon(this.buttonEl, icon); return this; }
+  setTooltip(text: string) { this.buttonEl.setAttribute("aria-label", text); return this; }
+  onClick(callback: () => void) { this.buttonEl.onclick = callback; return this; }
+}
+export class DropdownComponent {
+  selectEl: HTMLSelectElement;
+  constructor(parent: HTMLElement) { this.selectEl = create(parent, "select") as HTMLSelectElement; }
+  addOption(value: string, label: string) { this.selectEl.add(new Option(label, value)); return this; }
+  setValue(value: string) { this.selectEl.value = value; return this; }
+  onChange(callback: (value: string) => void) { this.selectEl.onchange = () => callback(this.selectEl.value); return this; }
+}
+class ToggleComponent {
+  toggleEl: HTMLInputElement;
+  constructor(parent: HTMLElement) { this.toggleEl = create(parent, "input", { type: "checkbox" }) as HTMLInputElement; }
+  setValue(value: boolean) { this.toggleEl.checked = value; return this; }
+  onChange(callback: (value: boolean) => void) { this.toggleEl.onchange = () => callback(this.toggleEl.checked); return this; }
+}
+class SliderComponent {
+  sliderEl: HTMLInputElement;
+  constructor(parent: HTMLElement) { this.sliderEl = create(parent, "input", { type: "range" }) as HTMLInputElement; }
+  setLimits(min: number, max: number, step: number) { Object.assign(this.sliderEl, { min, max, step }); return this; }
+  setValue(value: number) { this.sliderEl.value = String(value); return this; }
+  setDynamicTooltip() { return this; }
+  onChange(callback: (value: number) => void) { this.sliderEl.oninput = () => callback(Number(this.sliderEl.value)); return this; }
+}
+export class Setting {
+  settingEl: HTMLElement; infoEl: HTMLElement; nameEl: HTMLElement; descEl: HTMLElement; controlEl: HTMLElement;
+  constructor(parent: HTMLElement) {
+    this.settingEl = create(parent, "div", { cls: "setting-item" });
+    this.infoEl = create(this.settingEl, "div", { cls: "setting-item-info" });
+    this.nameEl = create(this.infoEl, "div", { cls: "setting-item-name" });
+    this.descEl = create(this.infoEl, "div", { cls: "setting-item-description" });
+    this.controlEl = create(this.settingEl, "div", { cls: "setting-item-control" });
+  }
+  setName(text: string) { this.nameEl.textContent = text; return this; }
+  setDesc(text: string) { this.descEl.textContent = text; return this; }
+  addText(build: (component: TextComponent) => void) { build(new TextComponent(this.controlEl)); return this; }
+  addTextArea(build: (component: TextComponent) => void) { build(new TextComponent(this.controlEl, true)); return this; }
+  addButton(build: (component: ButtonComponent) => void) { build(new ButtonComponent(this.controlEl)); return this; }
+  addExtraButton(build: (component: ButtonComponent) => void) { return this.addButton(build); }
+  addDropdown(build: (component: DropdownComponent) => void) { build(new DropdownComponent(this.controlEl)); return this; }
+  addToggle(build: (component: ToggleComponent) => void) { build(new ToggleComponent(this.controlEl)); return this; }
+  addSlider(build: (component: SliderComponent) => void) { build(new SliderComponent(this.controlEl)); return this; }
+}
 export class Plugin {}
 export const Platform = { isMobile: true };
 export const setIcon = (el: HTMLElement, icon: string) => {

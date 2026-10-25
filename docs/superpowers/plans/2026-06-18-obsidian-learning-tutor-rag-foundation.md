@@ -1,5 +1,9 @@
 # Obsidian 学习导师插件 — Plan 1：RAG 基础 Implementation Plan
 
+> 历史设计与实现快照，版本标注更新于 2026-10-25。当前版本 **0.6.1**，正文中的旧 API、功能、验证数字及审核状态不代表现行实现。参见[文档目录](../../README.md)、[使用手册](../../使用手册.md)与[0.6.1 改动说明](../../0.6.1-change-notes.md)。
+>
+> 当前围绕会话固定的材料讨论；对话不自动检索、不生成配图。0.6.1 提示词按任务推进并明确归属与证据边界。
+
 > 历史快照（2026-06-18）。本项目已演进为 **Cobrain（创作副脑）**。本文档保留作过程记录，当前设计以 `README.md` 及 design 文档「演进」小节为准。
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.

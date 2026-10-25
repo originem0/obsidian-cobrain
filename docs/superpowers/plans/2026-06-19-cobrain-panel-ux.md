@@ -1,5 +1,9 @@
 # 面板与引用体验优化 实现计划
 
+> 历史设计与实现快照，版本标注更新于 2026-10-25。当前版本 **0.6.1**，正文中的旧 API、功能、验证数字及审核状态不代表现行实现。参见[文档目录](../../README.md)、[使用手册](../../使用手册.md)与[0.6.1 改动说明](../../0.6.1-change-notes.md)。
+>
+> 当前会话材料与历史独立保存，操作位于更多菜单；没有自动检索或配图按钮。0.6.1 修正设置页滚动与窄屏布局。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 引用进面板时隐式把源笔记小节喂给 LLM（方案 C）；输入框随内容自适应；面板简洁化并把内联样式迁到 `styles.css`（CSS 变量、跟随主题）。

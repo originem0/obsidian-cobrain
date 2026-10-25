@@ -4,6 +4,7 @@ import { DEFAULT_SETTINGS } from "../../src/settings";
 import { newSession, ChatSession } from "../../src/chat/session";
 import { SessionStore } from "../../src/chat/sessionStore";
 import { Platform, TFile, Notice } from "obsidian";
+import "./settings";
 
 const w = window as any;
 const docs = new Map<string, string>([

@@ -12,4 +12,14 @@ a { color:var(--text-accent); } .modal-container { position:fixed; inset:0; back
 .menu { position:fixed; z-index:90; right:12px; top:48px; width:230px; max-height:85vh; overflow:auto; padding:6px; border:1px solid var(--background-modifier-border); border-radius:8px; background:var(--background-primary); box-shadow:var(--shadow-s); }
 .menu button,.suggestion-item { display:block; width:100%; text-align:left; border:none; min-height:40px; }
 #reader-focus { position:fixed; top:0; left:0; width:1px; height:1px; clip-path:inset(50%); overflow:hidden; padding:0; border:0; }
+/* Host layout mirrors Obsidian 1.14.5's settings scroll container and Setting rows. */
+.cobrain-settings-test-host { position:fixed; inset:12px; z-index:200; display:flex; flex-direction:column; max-width:900px; margin:auto; overflow:hidden; background:var(--background-primary); border:1px solid var(--background-modifier-border); }
+.settings-test-title { padding:12px 20px; flex:0 0 auto; font-weight:600; }
+.cobrain-settings-test-host .vertical-tab-content-container { position:relative; overflow:hidden; flex-grow:1; min-height:0; min-width:0; }
+.vertical-tab-content { overflow-y:auto; height:100%; padding:24px; box-sizing:border-box; container-type:inline-size; }
+.setting-item { display:flex; align-items:flex-start; gap:12px; padding:16px 0; border-bottom:1px solid var(--background-modifier-border); }
+.setting-item-info { flex:1 1 auto; min-width:0; }
+.setting-item-description { color:var(--text-muted); font-size:0.85em; margin-top:6px; }
+.setting-item-control { flex:1 1 auto; text-align:end; display:flex; justify-content:flex-end; align-items:center; gap:8px; }
+.constrained-settings .vertical-tab-content { display:flex; flex-direction:column; overflow-y:hidden; }
 </style></head><body class="is-mobile"><main id="host"></main><button id="reader-focus">Reading focus test target</button><script type="module" src="/harness.js"></script></body></html>

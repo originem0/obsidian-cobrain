@@ -7,6 +7,7 @@ jest.mock("obsidian", () => ({
 }), { virtual: true });
 
 import { DEFAULT_SETTINGS, normalizeSettingsData } from "./settings";
+const previousDefaults = require("./testFixtures/prompts-0.6.0.json");
 
 test("normalizeSettingsData 兼容旧版扁平 data.json 并剔除旧 index 字段", () => {
   const legacyIndex = { entries: [] };
@@ -76,4 +77,27 @@ test("升级后不会沿用全库索引或无效预算，自定义人设保留",
   expect(out.settings.indexIncludeFolders).toBe("");
   expect(out.settings.contextBudgetTokens).toBe(4096);
   expect((out.settings as any).imageKey).toBeUndefined();
+});
+
+test.each([false, true])("原样 0.6.0 提示词升级为新版，兼容包装结构 %s", wrapped => {
+  const data = { ...previousDefaults, llmBaseUrl: "https://chat.example/v1", noteFolder: "我的笔记" };
+  const { settings } = normalizeSettingsData(wrapped ? { settings: data } : data);
+  for (const key of ["tutorPrompt", "conceptMapPrompt", "notePrompt"] as const) {
+    expect(settings[key]).toBe(DEFAULT_SETTINGS[key]);
+    expect(settings[key]).not.toBe(previousDefaults[key]);
+  }
+  expect(settings.llmBaseUrl).toBe(data.llmBaseUrl);
+  expect(settings.noteFolder).toBe(data.noteFolder);
+  expect(normalizeSettingsData({ settings }).settings).toEqual(settings);
+});
+
+test("只修改一行的旧提示词也保留，未修改的其它提示词仍可升级", () => {
+  for (const key of ["tutorPrompt", "conceptMapPrompt", "notePrompt"] as const) {
+    const custom = `${previousDefaults[key]}\n保留这一行自定义规则。`;
+    const { settings } = normalizeSettingsData({ settings: { ...previousDefaults, [key]: custom } });
+    expect(settings[key]).toBe(custom);
+    for (const other of ["tutorPrompt", "conceptMapPrompt", "notePrompt"] as const) {
+      if (other !== key) expect(settings[other]).toBe(DEFAULT_SETTINGS[other]);
+    }
+  }
 });

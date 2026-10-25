@@ -2,6 +2,8 @@
 
 An Obsidian conversation partner for thinking deeply about documents you choose. Desktop and mobile, without automatic vault-wide search.
 
+当前版本 **0.6.1**。安装文件见 [GitHub Release](https://github.com/originem0/obsidian-cobrain/releases/tag/0.6.1)，本版修复设置页展开后的滚动与窄屏布局，并更新默认提示词。
+
 Cobrain 围绕你明确选择的文档、选文和问题展开讨论。默认只需要一个文本模型；普通对话不建立索引、不检索全库、不调用嵌入端点。
 
 ## 从一篇文档开始
@@ -28,6 +30,16 @@ Cobrain 围绕你明确选择的文档、选文和问题展开讨论。默认只
 文档属于笔记库，不代表观点属于用户。材料可标注为归属未确认、我的笔记、外部材料或 AI 整理。文档的 `author` 和 `source` 字段也会作为来源说明进入上下文。
 
 运行规则要求区分原作者的观点、用户明确表达或认可的判断、副脑提出的解释和假设。整理出来的笔记带有 `cobrain_generated: true` 标记，后续作为材料时也不会默认视为用户原有立场。
+
+追问、沉默或要求整理不等于认可。新版默认提示词还要求保留判断依据和适用条件，不把相关性画成因果，也不把未确认的概念名称变成已有笔记链接。这些规则引导模型行为，仍需审阅回答、概念图和笔记。
+
+## 设置与提示词
+
+设置页可展开全部分区并向下滚动；提示词编辑框占满设置行，窄窗口中的控件允许换行。
+
+三组可编辑提示词分别用于普通对话、概念图和笔记整理。推敲观点与长对话摘要使用独立策略，修改副脑人设不会同时改变它们。原样旧默认值在升级时自动更新，修改过的内容保留，也可逐项恢复默认。
+
+模型没有联网核验或检查笔记链接目标的工具。长文节选和旧摘要不等于完整原文，不能据此声称读完全文或完成事实核验。
 
 ## 可选的手动资料检索
 
@@ -61,7 +73,7 @@ npm install
 npm run build
 ```
 
-将 `main.js`、`manifest.json`、`styles.css` 三个文件复制到 `<vault>/.obsidian/plugins/cobrain/`，启用插件，配置文本端点、API Key 和模型。无需配置图像或嵌入端点即可开始文档对话。
+从 Release 下载 `cobrain-0.6.1.zip`，或分别下载 `main.js`、`manifest.json`、`styles.css`。将这三个文件复制到 `<vault>/.obsidian/plugins/cobrain/`，启用插件，配置文本端点、API Key 和模型。升级只替换这三个文件，保留 `data.json`、`sessions/` 和 `index/`。无需配置图像或嵌入端点即可开始文档对话。
 
 已有安装升级后请重新加载插件；移动端需要重启 Obsidian 才会加载同步来的代码。旧版草稿自动迁移，旧数据保留为迁移备份。以前已经被旧版截掉的原文无法从摘要还原。原样默认提示词会更新，自定义提示词保留。
 
@@ -79,6 +91,6 @@ npm run build
 npm run test:ui
 ```
 
-浏览器验证复用项目已有的 esbuild 和本机 Chrome/Edge，不下载依赖。可用 `COBRAIN_CHROME` 指定浏览器路径。它运行实际的对话界面、会话存储和上下文逻辑，Obsidian 宿主用浏览器适配层模拟；不访问真实笔记或模型接口，不替代手机真机验收。截图和报告输出到已忽略的 `.audit/ui/`。
+浏览器验证复用项目已有的 esbuild 和本机 Chrome/Edge，不下载依赖。可用 `COBRAIN_CHROME` 指定浏览器路径。它运行实际的对话界面、设置页、会话存储和上下文逻辑；设置页检查九个面板全部展开后的滚轮移动、底部控件可见与窄屏控件边界。Obsidian 宿主用浏览器适配层模拟，不访问真实笔记或模型接口，不替代真实宿主、手机或模型效果验收。截图和报告输出到已忽略的 `.audit/ui/`。
 
-详见[使用手册](docs/使用手册.md)和[0.6.0 改动说明](docs/0.6.0-change-notes.md)。`docs/superpowers/` 与旧实践演练保留为历史设计记录。
+详见[文档目录](docs/README.md)、[使用手册](docs/使用手册.md)、[实践演练](docs/实践演练.md)、[提示词与设置页审查](docs/提示词与设置页审查.md)和[0.6.1 改动说明](docs/0.6.1-change-notes.md)。旧演练和 `docs/superpowers/` 保留为历史记录，并注明当前入口。

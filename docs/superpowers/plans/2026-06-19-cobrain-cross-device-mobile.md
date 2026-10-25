@@ -1,5 +1,9 @@
 # 跨设备私用（移动端启用）实现计划
 
+> 历史设计与实现快照，版本标注更新于 2026-10-25。当前版本 **0.6.1**，正文中的旧 API、功能、验证数字及审核状态不代表现行实现。参见[文档目录](../../README.md)、[使用手册](../../使用手册.md)与[0.6.1 改动说明](../../0.6.1-change-notes.md)。
+>
+> 当前移动端直接讨论附加文档无需索引；可选索引由桌面写入、移动端只读。代码更新后重启，设置、会话与索引的同步边界见使用手册。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 摘掉 `isDesktopOnly` 让 Cobrain 桌面 + 移动端通用，并让移动端只读检索、绝不写索引。

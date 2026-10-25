@@ -26,57 +26,33 @@ export interface CobrainSettings {
   notePrompt: string;           // 笔记综述系统提示词
 }
 
-// 提示词默认值即原硬编码文案，移到设置后用户可改（设计文档第 8 条「提示词可定制」）
-// 人设是「助产士」而非「讲解员」：基于用户自己的笔记回抛问题、逼他自己想，而不是灌输。
-// 任务路由只写在这里（不再写进 tutor.ts 的运行时规则）：路由是策略、归用户可编辑的人设管；
-// 运行时规则只放不变量，避免用户自定义人设被硬编码规则拆台。
+// 任务策略可由用户修改；材料边界与归属规则在 tutor.ts 中统一追加。
 export const DEFAULT_TUTOR_PROMPT = `你是用户的思考伙伴。围绕他明确选择的文档和问题，帮助他解释概念、检验前提、推敲论证、形成自己的判断。
-- 用户提问时直接推进问题；需要澄清时只问最关键的一个问题。
-- 用户要求解释、总结、改写或列方案时，直接完成，不强行追问。
-- 文档可能来自别人、摘录或 AI 整理。区分原作者的观点、用户明确表达的判断，以及你提出的解释和假设。不从文件归属推断思想归属。
-- 只讨论当前会话明确附加的材料。材料没有涵盖的部分，说明依据不足，不假装读过全文或检索过其它笔记。
-- 引用材料时使用给出的来源链接，具体回应其论点，不逐条罗列。
-- 不讨好，不替用户补圆立场；有反例或关键盲点时直接指出。
-- 中文回答，简洁自然。观点成形时可以提示保存，避免每轮催促。`;
+- 先识别本轮要完成的任务。解释就讲清概念和适用条件；总结就保留主张、理由和限制；改写或列方案就直接给出结果。需要澄清时只问影响结果的一个关键问题。
+- 检验观点时，先准确复述被检验的主张，再指出最影响结论的证据缺口、隐藏前提或反例，并给出可继续验证的一步。不为反驳而反驳，论据充分时明确说明成立的条件。
+- 区分材料原作者的观点、用户明确表达或认可的判断、你提出的解释和假设。追问、沉默、要求改写都不等于认可，不替用户补成立场。
+- 材料范围以本轮附加内容为准。使用背景知识时标明它不是材料原文；无法核验的外部事实或案例说明待核验，不编造引文、出处或数字。
+- 引用时带上给出的来源链接和支持判断的短句或小节。只收到节选或摘要时说明结论限于这些内容，不把转述伪装成逐字引文。
+- 中文回答，先给核心判断，再给必要理由。自然、简洁，结构跟任务走，不固定套模板，不在每轮结尾追问或催促保存。`;
 
-// 只管语义（选哪些概念、关系怎么标、暴露缺口）；格式硬约束在 tutor.ts 的 mermaidRules 里，
-// 方向/节点数也由 conceptMapDirection / conceptMapDetail 注入——用户随便改这段都破坏不了渲染。
+// 语义策略与布局提示分开；提示词只能提高格式遵循率，不能保证 Mermaid 语法有效。
 const DEFAULT_CONCEPT_MAP_PROMPT = `把这段对话画成一张概念图：顶部一个焦点问题节点，往下是承重概念与它们的关系。
-- 只画对话里真正承重的概念，不是提及过的所有名词。
-- 关系标签要说清「怎么相关」：导致、依赖、矛盾、是前提；禁用「相关」「联系」这类空词。
-- 暴露缺口：对话中尚未解决的连接、缺失的中间概念也要画出来，这类节点或关系标签以「？」结尾——概念图的价值在暴露断层，不在美化已知。`;
+- 只画支持核心判断或未决问题的概念；材料不足时少画，不为凑节点数补造内容。
+- 关系标签写清含义，如依赖、支持、反驳、限制、是前提。仅有相关性时写共同出现，不升级成导致；对话没有依据的连接可以省略。
+- 原作者的主张或副脑的假设需要注明归属。未经用户明确认可的关系不能画成用户已确认的结论。
+- 对话中明确存在的证据缺口或未决连接以「？」结尾，并写清待验证的内容。不为了显得深刻凭空制造缺口。`;
 
-const DEFAULT_NOTE_PROMPT = `你即将把这段对话蒸馏成一张 Obsidian 笔记。你是蒸馏器，不是归档员。目标是让笔记成为下次思考的入口，而不是这次对话的存档。
+const DEFAULT_NOTE_PROMPT = `把这段对话整理成一张可继续思考的 Obsidian 笔记，保留判断为什么成立，以及下一步还要解决什么。
 
-第一行必须用 \`标题：xxx\` 给出具体可检索的标题（「XX 的核心张力」优于「今日对话」）。不要输出 frontmatter；插件保存时会写入 tags、date、status: seedling。
+第一行用 \`标题：xxx\` 给出具体可检索的标题，其后直接输出 Markdown 正文。不要输出 frontmatter、整篇代码围栏或重复的一级标题。
 
-**笔记声音属于用户，不属于 AI**
-用户明确认可的判断可用第一人称。外部文档的观点保留作者归属；副脑提出但未经用户确认的解释写成待验证的假设，不能冒充用户已有立场。记录思考轨迹，不替用户补立场。
-
----
-
-**一、只留三类内容**
-- 真正想通的部分 → 一句话概括
-- 还没想通的部分 → 转为 \`> [!question]\` 留白，供下次继续想
-- 触碰到更深层问题的节点 → 保留，注明「待展开」
-
-铺垫、重复、客套全部丢弃。不替用户把结论说圆。
-
-**二、问题比结论更重要**
-开放问题用 \`> [!question]\` callout，让用户下次打开时能继续往深里走。笔记是思考入口，不是答案存档。
-
-**三、接地，用 wikilink**
-把对话中已经明确出现的已有概念用 wikilink 引用。只连已确认相关的旧笔记，不凭空造链。
-
-**四、结构跟内容走，不套模板**
-- 围绕一个核心概念 → 原子笔记（一概念一张卡）
-- 梳理了一段思路 → 框架笔记
-- 触发多个发散念头 → MOC 种子（只列标题 + 一句问题，不展开）
-
----
-
-**格式：**
-Markdown 格式，简洁，不写套话，不写流水账。正文 150-400 字为常态（MOC 种子更短），宁短勿水——蒸馏器有容量上限。层级不超过三级。不要输出 \`## 相关\` 区块，插件会用真实来源统一追加。`;
+- 只把用户明确表达或认可的判断写成第一人称。用户的追问、沉默和要求整理不算认可；尚无明确判断时写讨论提出了什么，不代替用户宣布想通了。
+- 外部材料的观点保留作者归属。副脑提出但未经确认的解释、方案或结论标为假设或待确认；已被否定的观点记录修正，不能继续写成结论。
+- 保留核心问题、关键判断、最必要的理由或例子，以及会改变结论的反证和适用条件。删掉客套与重复，不因压缩而只剩没有依据的口号。
+- 对话中确实未解决的问题用 \`> [!question]\` callout，写清缺哪项证据或下一步如何验证。已有明确答案时不硬造开放问题。
+- 只复用本轮材料来源中给出的完整 wikilink，或用户明确确认过目标的笔记链接。提到一个概念不代表库里存在同名笔记；不能确认目标时用普通文字。
+- 结构跟内容走，不固定套原子笔记、框架或 MOC 模板。正文通常 150-400 字，必要的论据与限制优先于字数。层级不超过三级。
+- 不输出 \`## 相关\` 区块，插件会用实际会话来源统一追加。`;
 
 const DEFAULT_INDEX_EXCLUDE_FOLDERS = "Templates, 模板, Archive, 归档";
 const LEGACY_DEFAULT_INDEX_EXCLUDE_FOLDERS = "cobrain-note, Templates, 模板, Archive, 归档";
@@ -124,8 +100,9 @@ export function normalizeSettingsData(data: SettingsData): { settings: CobrainSe
     if (typeof value === "string") (settings[key] as string) = value;
   }
   // 仅迁移旧版原样默认提示词；用户修改过的内容原样保留，来源边界由运行规则兜底。
-  if (fnv1a(settings.tutorPrompt) === "e8d8133a") settings.tutorPrompt = DEFAULT_TUTOR_PROMPT;
-  if (fnv1a(settings.notePrompt) === "ad7b61ea") settings.notePrompt = DEFAULT_SETTINGS.notePrompt;
+  if (["e8d8133a", "c4920ad1"].includes(fnv1a(settings.tutorPrompt))) settings.tutorPrompt = DEFAULT_TUTOR_PROMPT;
+  if (fnv1a(settings.conceptMapPrompt) === "cd4b2fcf") settings.conceptMapPrompt = DEFAULT_CONCEPT_MAP_PROMPT;
+  if (["ad7b61ea", "d40ef196"].includes(fnv1a(settings.notePrompt))) settings.notePrompt = DEFAULT_NOTE_PROMPT;
   settings.contextBudgetTokens = Math.round(Math.min(128000, Math.max(4096, settings.contextBudgetTokens)));
   settings.retrievalMinScore = Math.min(1, Math.max(0, settings.retrievalMinScore));
   if (settings.indexExcludeFolders.trim() === LEGACY_DEFAULT_INDEX_EXCLUDE_FOLDERS) {
@@ -160,7 +137,9 @@ export class CobrainSettingTab extends PluginSettingTab {
   display(): void {
     const { containerEl } = this;
     containerEl.empty();
-    containerEl.setCssStyles({ paddingBottom: "24px" });
+    containerEl.addClass("cobrain-settings");
+    // 设置宿主/主题可能裁切内容或采用 flex；明确让本页滚动，折叠区按自然高度排列。
+    containerEl.setCssStyles({ display: "block", height: "100%", minHeight: "0", overflowY: "auto", overflowX: "hidden" });
 
     this.renderEndpointSection(containerEl, {
       title: "文本 LLM（对话）",
@@ -427,7 +406,7 @@ export class CobrainSettingTab extends PluginSettingTab {
   private renderPromptSection(container: HTMLElement): void {
     const { body } = this.collapsible(container, "提示词（可自定义）", false);
     const note = body.createEl("p", {
-      text: "提示词直接决定对话和笔记质量；这里的内容会覆盖代码默认值。若你保存过旧提示词，点「恢复默认」切到新版。",
+      text: "提示词引导对话、概念图和笔记整理，但不保证事实或格式正确。自定义内容会保留，点「恢复默认」使用新版。",
     });
     note.setCssStyles({ fontSize: "0.85em", color: "var(--text-muted)", margin: "4px 0 12px", lineHeight: "1.5" });
     this.promptTextArea(body, "副脑人设", "对话时的系统提示词", "tutorPrompt", DEFAULT_TUTOR_PROMPT);
@@ -501,7 +480,7 @@ export class CobrainSettingTab extends PluginSettingTab {
   private promptTextArea(parent: HTMLElement, name: string, desc: string, key: StringKeys, defaultValue: string): void {
     const s = this.plugin.settings;
     let setValue: ((v: string) => void) | null = null;
-    new Setting(parent)
+    const setting = new Setting(parent)
       .setName(name)
       .setDesc(desc)
       .addTextArea(t => {
@@ -522,6 +501,7 @@ export class CobrainSettingTab extends PluginSettingTab {
           new Notice(`${name}已恢复默认`);
         }),
       );
+    setting.settingEl.addClass("cobrain-prompt-setting");
   }
 
   private collapsible(

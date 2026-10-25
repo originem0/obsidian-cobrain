@@ -98,8 +98,28 @@ try {
     const shot = await send("Page.captureScreenshot", { format: "png", captureBeyondViewport: false });
     await writeFile(path.join(output, `${size.name}.png`), Buffer.from(shot.data, "base64"));
   }
+  const settingsLayouts = [];
+  for (const size of [
+    { name: "settings-desktop", width: 1000, height: 720, mobile: false },
+    { name: "settings-mobile", width: 390, height: 844, mobile: true },
+    { name: "settings-small", width: 320, height: 360, mobile: true },
+    { name: "settings-constrained", width: 480, height: 640, mobile: false, constrained: true },
+  ]) {
+    await send("Emulation.setDeviceMetricsOverride", { width: size.width, height: size.height, deviceScaleFactor: 1, mobile: size.mobile });
+    await evaluate(`window.setMobile(${size.mobile}); window.openSettingsTest(${!!size.constrained});`);
+    const target = await evaluate("window.settingsScrollTarget()");
+    await send("Input.dispatchMouseEvent", { type: "mouseWheel", ...target, deltaX: 0, deltaY: 600 });
+    await new Promise(r => setTimeout(r, 100));
+    const layout = await evaluate("window.settingsLayout()");
+    settingsLayouts.push({ name: size.name, ...layout });
+    console.log(`${size.name}: ${JSON.stringify(layout)}`);
+    const shot = await send("Page.captureScreenshot", { format: "png", captureBeyondViewport: false });
+    await writeFile(path.join(output, `${size.name}.png`), Buffer.from(shot.data, "base64"));
+    if (!layout.wheelMoved || !layout.canScroll || !layout.lastControlVisible || !layout.controlsFit || layout.openPanels !== 9) throw new Error(`${size.name} settings layout failed: ${JSON.stringify(layout)}`);
+    await evaluate("window.closeSettingsTest()");
+  }
   if (exceptions.length) throw new Error(`Browser exceptions: ${JSON.stringify(exceptions)}`);
-  const report = { checks, layouts, note: "Actual view/store/Tutor in a browser-only Obsidian host adapter; device sizes and reduced keyboard viewport are emulated, not a physical phone." };
+  const report = { checks, layouts, settingsLayouts, note: "Actual view/settings/store/Tutor in a browser-only Obsidian host adapter; device sizes and reduced keyboard viewport are emulated, not a physical phone." };
   await writeFile(path.join(output, "report.json"), JSON.stringify(report, null, 2));
   console.log(JSON.stringify(report, null, 2));
   await send("Browser.close").catch(() => {});

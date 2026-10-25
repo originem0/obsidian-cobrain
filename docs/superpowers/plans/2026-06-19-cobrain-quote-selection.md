@@ -1,5 +1,9 @@
 # 选中即引用进 Cobrain 实现计划
 
+> 历史设计与实现快照，版本标注更新于 2026-10-25。当前版本 **0.6.1**，正文中的旧 API、功能、验证数字及审核状态不代表现行实现。参见[文档目录](../../README.md)、[使用手册](../../使用手册.md)与[0.6.1 改动说明](../../0.6.1-change-notes.md)。
+>
+> 当前选区作为会话原文快照保存，并替换同篇全文引用；不会隐式补读未附加的源文全文，也不会触发自动检索。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 编辑模式下选中文本，经右键菜单或命令把「来源链接 + 原文」预填进 Cobrain 输入框，免复制粘贴。

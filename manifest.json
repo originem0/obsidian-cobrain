@@ -1,7 +1,7 @@
 {
   "id": "cobrain",
   "name": "Cobrain",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "minAppVersion": "1.5.7",
   "description": "围绕指定文档深入讨论的 Obsidian 文本副脑：独立历史会话、可控材料范围与按需检索，支持桌面和移动端。",
   "author": "samsara",
