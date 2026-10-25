@@ -42,8 +42,8 @@ test("normalizeSettingsData 兼容新版 settings 包装结构", () => {
     },
   });
 
-  expect(out.settings.imageBaseUrl).toBe("https://image.example/v1");
-  expect(out.settings.imageModel).toBe("image-model");
+  expect((out.settings as any).imageBaseUrl).toBeUndefined();
+  expect((out.settings as any).imageModel).toBeUndefined();
   expect(out.settings.retrievalMinScore).toBe(0.35);
   expect(out.settings.indexExcludeFolders).toBe("Archive");
   expect(out.settings.llmBaseUrl).toBe(DEFAULT_SETTINGS.llmBaseUrl);
@@ -62,8 +62,18 @@ test("normalizeSettingsData 把短暂发布过的错误默认排除列表迁回�
 test("DEFAULT_SETTINGS 新安装不预填第三方端点和模型", () => {
   expect(DEFAULT_SETTINGS.llmBaseUrl).toBe("");
   expect(DEFAULT_SETTINGS.llmModel).toBe("");
-  expect(DEFAULT_SETTINGS.imageBaseUrl).toBe("");
-  expect(DEFAULT_SETTINGS.imageModel).toBe("");
+  expect(DEFAULT_SETTINGS.indexEnabled).toBe(false);
+  expect(DEFAULT_SETTINGS.indexIncludeFolders).toBe("");
   expect(DEFAULT_SETTINGS.embedBaseUrl).toBe("");
   expect(DEFAULT_SETTINGS.embedModel).toBe("");
+});
+
+
+test("升级后不会沿用全库索引或无效预算，自定义人设保留", () => {
+  const out = normalizeSettingsData({ settings: { tutorPrompt: "我的自定义规则", contextBudgetTokens: -1, imageKey: "旧密钥" } });
+  expect(out.settings.tutorPrompt).toBe("我的自定义规则");
+  expect(out.settings.indexEnabled).toBe(false);
+  expect(out.settings.indexIncludeFolders).toBe("");
+  expect(out.settings.contextBudgetTokens).toBe(4096);
+  expect((out.settings as any).imageKey).toBeUndefined();
 });

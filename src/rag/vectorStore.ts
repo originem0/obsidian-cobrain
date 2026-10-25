@@ -68,9 +68,10 @@ export class VectorStore {
     this.hashes[path] = hash;
   }
 
-  async query(vector: number[], k: number, minScore = -Infinity): Promise<QueryHit[]> {
+  async query(vector: number[], k: number, minScore = -Infinity, allowed?: (path: string) => boolean): Promise<QueryHit[]> {
     // 快照 entries：大库分批 await 期间若有增删重置 this.entries，本次仍迭代稳定的旧数组，不崩（结果至多略陈旧）。
-    const entries = this.entries;
+    const entries = allowed ? this.entries.filter(e => allowed(e.path)) : this.entries;
+    if (k <= 0) return [];
     // 维度守卫：查询向量与索引向量维度不一致 → 换过模型但没重建索引。
     // 不拦截的话点积会算出垃圾且不报错（曾踩过这个坑）。
     if (entries.length && entries[0].q.length !== vector.length) {
@@ -93,6 +94,8 @@ export class VectorStore {
     const hits: QueryHit[] = [];
     const seen = new Set<string>();
     for (const { e, score } of scored) {
+      // 大库打分会让出主线程；用户在这段时间收窄范围后，不能返回已经撤销的材料。
+      if (allowed && !allowed(e.path)) continue;
       if (seen.has(e.path)) continue;
       seen.add(e.path);
       if (score < minScore) continue;

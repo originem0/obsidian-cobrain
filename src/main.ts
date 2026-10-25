@@ -1,100 +1,20 @@
-import { Plugin, Notice, TFile, Modal, App, debounce, Platform, Editor, MarkdownFileInfo } from "obsidian";
+import { Plugin, Notice, TFile, TFolder, Modal, App, debounce, Platform, Editor, MarkdownFileInfo, WorkspaceLeaf } from "obsidian";
 import { CobrainSettings, CobrainSettingTab, normalizeSettingsData } from "./settings";
 import { ApiEmbedder } from "./rag/apiEmbedder";
 import { VectorStore, type QueryHit } from "./rag/vectorStore";
-import { Indexer } from "./rag/indexer";
+import { Indexer, shouldIndexPath } from "./rag/indexer";
 import { Retriever } from "./rag/retriever";
 import { ChatClient } from "./llm/chatClient";
-import type { ChatMsg } from "./llm/chatClient";
 import { Tutor } from "./tutor/tutor";
 import { ChatView, VIEW_TYPE_COBRAIN_CHAT } from "./ui/chatView";
-import { ImageClient } from "./llm/imageClient";
-import { buildQuote, findHeadingAbove, extractContext } from "./util/quote";
+import { buildQuote, findHeadingAbove } from "./util/quote";
 import { IndexStore } from "./rag/indexStore";
 import type { IndexFailure } from "./rag/indexer";
-
-export interface SavedNoteState {
-  stateSignature: string;
-  path: string;
-  savedAt: number;
-}
-
-// 滚动摘要：text = 已滑出模型窗口的旧消息的摘要；coveredCount = 摘要已覆盖到 history 的第几条（不含）。
-export interface ContextSummaryState {
-  text: string;
-  coveredCount: number;
-}
-
-export interface ChatDraft {
-  history: ChatMsg[];
-  sources: string[];
-  lastMermaid: string | null;
-  lastImageEmbed: string | null;
-  lastSavedNote: SavedNoteState | null;
-  contextSummary: ContextSummaryState | null;
-  savedAt: number;
-}
-
-// 弹窗类（askPrompt/askConfirm/askSaveOptions 等）在 ./ui/modals。
-
-export function normalizeChatDrafts(raw: unknown): Record<number, ChatDraft> {
-  const out: Record<number, ChatDraft> = {};
-  if (!raw || typeof raw !== "object") return out;
-  const source = raw as Record<string, unknown>;
-  for (const key of Object.keys(source)) {
-    const id = Number(key);
-    if (!Number.isInteger(id) || id < 1 || id > 3) continue;
-    const d = source[key];
-    if (!d || typeof d !== "object") continue;
-    const obj = d as Record<string, unknown>;
-    const rawHistory = Array.isArray(obj.history) ? obj.history : [];
-    const history = rawHistory.flatMap((m): ChatMsg[] => {
-      if (!m || typeof m !== "object") return [];
-      const msg = m as Record<string, unknown>;
-      const role = msg.role;
-      const content = msg.content;
-      if ((role === "user" || role === "assistant") && typeof content === "string") return [{ role, content }];
-      return [];
-    });
-    if (!history.length) continue;
-    const rawLastSaved = obj.lastSavedNote;
-    const lastSavedNote =
-      rawLastSaved && typeof rawLastSaved === "object"
-        && typeof (rawLastSaved as Record<string, unknown>).stateSignature === "string"
-        && typeof (rawLastSaved as Record<string, unknown>).path === "string"
-        && typeof (rawLastSaved as Record<string, unknown>).savedAt === "number"
-        ? {
-          stateSignature: (rawLastSaved as Record<string, unknown>).stateSignature as string,
-          path: (rawLastSaved as Record<string, unknown>).path as string,
-          savedAt: (rawLastSaved as Record<string, unknown>).savedAt as number,
-        }
-        : null;
-    const rawSummary = obj.contextSummary;
-    const summaryText =
-      rawSummary && typeof rawSummary === "object" && typeof (rawSummary as Record<string, unknown>).text === "string"
-        ? ((rawSummary as Record<string, unknown>).text as string).trim()
-        : "";
-    const summaryCovered =
-      rawSummary && typeof rawSummary === "object" ? (rawSummary as Record<string, unknown>).coveredCount : undefined;
-    // history 超 80 截断时，coveredCount 按同样的偏移平移（saveChatDraft 落盘时已做，这里防手改 data.json 再兜一次）
-    const kept = history.slice(-80);
-    const droppedCount = history.length - kept.length;
-    const contextSummary: ContextSummaryState | null =
-      summaryText && typeof summaryCovered === "number" && Number.isInteger(summaryCovered) && summaryCovered >= 0
-        ? { text: summaryText, coveredCount: Math.min(Math.max(0, summaryCovered - droppedCount), kept.length) }
-        : null;
-    out[id] = {
-      history: kept,
-      sources: Array.isArray(obj.sources) ? obj.sources.filter((v): v is string => typeof v === "string").slice(0, 80) : [],
-      lastMermaid: typeof obj.lastMermaid === "string" ? obj.lastMermaid : null,
-      lastImageEmbed: typeof obj.lastImageEmbed === "string" ? obj.lastImageEmbed : null,
-      lastSavedNote,
-      contextSummary,
-      savedAt: typeof obj.savedAt === "number" && Number.isFinite(obj.savedAt) ? obj.savedAt : Date.now(),
-    };
-  }
-  return out;
-}
+import { parseFolders, type RetrievalScope } from "./rag/scope";
+import { SessionStore } from "./chat/sessionStore";
+import { newSession, migrateLegacyDrafts, type ChatSession, type MaterialReference } from "./chat/session";
+import { RetrievalModal } from "./ui/retrievalModal";
+export type { SavedNoteState, ContextSummaryState } from "./chat/session";
 
 export default class CobrainPlugin extends Plugin {
   settings!: CobrainSettings;
@@ -103,476 +23,390 @@ export default class CobrainPlugin extends Plugin {
   indexer!: Indexer;
   retriever!: Retriever;
   tutor!: Tutor;
-  image!: ImageClient;
   indexStore!: IndexStore;
-  // 按路径防抖「modify → 嵌入」的定时器，避免编辑期间反复触发 modify 反复打嵌入接口
+  sessions!: SessionStore;
+  private lastSessionId: string | null = null;
+  private lastDocumentPath: string | null = null;
+  private legacyDrafts: unknown;
+  private sessionsMigrated = false;
+  private legacyDataIndex: unknown;
   private modifyTimers = new Map<string, number>();
-  // 设置页逐字符 onChange 走这个防抖版：停顿 400ms 才落盘，避免每键一次写。
-  // 索引在 index/ 分片里（见 IndexStore），settings 本身已很小，这里再省掉高频小写入。
-  saveSettingsDebounced = debounce(() => void this.saveSettings(), 400, true);
-  // 草稿落盘走防抖：连续对话时每条消息都 persistDraft，800ms 合并一次写，避免每条触发一次全量 data.json 写。
-  // 关闭面板/卸载时 flushDrafts 强制冲一次，把崩溃丢失收敛到 <800ms 的草稿级风险。
-  saveDraftsDebounced = debounce(() => void this.saveSettings(), 800, true);
-  private disposed = false; // 卸载后置位：阻止已排队的防抖回调在插件卸载后继续写盘
-  // 索引加载较重（数百分片 + 上万向量反量化），不放进 onload 关键路径，否则 Obsidian 报「加载耗时过长」。
-  // onload 后台启动加载，检索/重嵌前先 await 它，确保不会查到半截索引。
-  private indexReady: Promise<void> = Promise.resolve();
+  private sessionTimers = new Map<string, { timer: number; session: ChatSession }>();
+  private sessionRequests = new Map<string, symbol>();
+  private disposed = false;
+  private indexReady: Promise<void> | null = null;
   private indexLoaded = false;
   private indexQueue: Promise<void> = Promise.resolve();
-  private legacyDataIndex: unknown;
-  private chatDrafts: Record<number, ChatDraft> = {};
-  // 多对话框支持：跟踪已打开的实例（最多 3 个）
-  private activeViewIds = new Set<number>();
-  private readonly MAX_VIEWS = 3;
+  private settingsQueue: Promise<void> = Promise.resolve();
+  saveSettingsDebounced = debounce(() => void this.saveSettings().catch(e => this.reportError(e)), 400, true);
 
-  async onload() {
+  async onload(): Promise<void> {
     await this.loadSettings();
+    const base = this.manifest.dir ?? `${this.app.vault.configDir}/plugins/${this.manifest.id}`;
+    this.sessions = new SessionStore(this.app.vault.adapter, `${base}/sessions`, message => new Notice(message, 10000));
+    await this.sessions.init();
+    if (!this.sessionsMigrated) {
+      for (const session of migrateLegacyDrafts(this.legacyDrafts)) {
+        if (!this.sessions.has(session.id)) await this.sessions.save(session);
+      }
+      this.sessionsMigrated = true;
+      await this.saveSettings();
+    }
     this.addSettingTab(new CobrainSettingTab(this.app, this));
-
     this.store = new VectorStore();
-    // 索引从 index/ 分片加载（旧 index.json 会在此一次性迁移为分片）——见下方后台 loadIndex()
     this.indexStore = new IndexStore(this.app, this.manifest, this.store);
     this.embedder = new ApiEmbedder(this.settings);
     this.indexer = new Indexer(this.app, this.embedder, this.store, this.settings);
-    // retriever 检索前会 await indexReady：启动后立刻查询也不会落空
-    this.retriever = new Retriever(this.embedder, this.store, this.settings, () => this.indexReady);
-    const chatClient = new ChatClient(this.settings);
-    this.tutor = new Tutor(this.retriever, chatClient, this.settings);
-    this.image = new ImageClient(this.settings);
+    this.retriever = new Retriever(this.embedder, this.store, this.settings, () => this.whenIndexReady());
+    this.tutor = new Tutor(new ChatClient(this.settings), this.settings);
 
-    // 注册 3 个独立的对话视图类型
-    for (let i = 1; i <= this.MAX_VIEWS; i++) {
-      this.registerView(`${VIEW_TYPE_COBRAIN_CHAT}-${i}`, (leaf) => new ChatView(leaf, this, i));
+    this.registerView(VIEW_TYPE_COBRAIN_CHAT, leaf => new ChatView(leaf, this));
+    // 旧布局类型继续可恢复；以后新建面板统一使用同一类型，会话不再依赖固定槽位。
+    for (let i = 1; i <= 3; i++) {
+      const type = `${VIEW_TYPE_COBRAIN_CHAT}-${i}`;
+      this.registerView(type, leaf => new ChatView(leaf, this, type));
     }
-
-    this.app.workspace.onLayoutReady(() => {
-      // 改名收尾：清掉旧视图类型 "lt-chat" 残留的孤儿面板（改名后该类型已不再注册）
-      this.app.workspace.detachLeavesOfType("lt-chat");
-      // 新建笔记自动入索引：放 onLayoutReady 内注册，避开启动时对每个已存文件触发 create 的风暴。
-      // 「存为笔记」/模板/同步进来的新笔记走 vault.create → 由此自动入索引（移动端只读，不注册）。
-      if (!Platform.isMobile) {
-        this.registerEvent(this.app.vault.on("create", (f) => {
-          if (f instanceof TFile && f.extension === "md") this.scheduleReindex(f);
-        }));
-      }
-    });
-    this.addRibbonIcon("brain", "创作副脑", () => void this.revealOrOpenChatView());
-    this.addCommand({
-      id: "open-tutor",
-      name: "打开创作副脑",
-      callback: () => void this.revealOrOpenChatView(),
-    });
-
-    this.addCommand({
-      id: "open-new-chat",
-      name: "新开一个对话面板",
-      callback: () => void this.openNewChatView(),
-    });
-
-    this.addCommand({
-      id: "reindex",
-      name: "重建索引",
-      callback: () => void this.rebuildIndex(),
-    });
-
-    this.addCommand({
-      id: "test-retrieval",
-      name: "测试检索",
-      callback: () => this.openRetrievalTest(),
-    });
-
-    this.addCommand({
-      id: "index-status",
-      name: "查看索引状态",
-      callback: () => void this.showIndexStatus(),
-    });
-
-    this.addCommand({
-      id: "quote-selection",
-      name: "引用选中文本",
-      editorCallback: (editor, ctx) => void this.quoteSelection(editor, ctx),
-    });
-
-    // 移动端只读：不注册自动重嵌（否则每改一篇笔记都走蜂窝网打嵌入接口，并重写 10MB 索引引发同步冲突）。
-    // 索引只在桌面端建，移动端读同步过来的索引做检索。
-    if (!Platform.isMobile) {
-      this.registerEvent(this.app.vault.on("modify", (f) => {
-        if (f instanceof TFile && f.extension === "md") this.scheduleReindex(f);
-      }));
-      this.registerEvent(this.app.vault.on("delete", async (f) => {
-        await this.indexReady; // 避免与后台加载竞争 store/分片
-        // 文件在防抖窗口内被删：清掉待嵌入定时器，否则会把已删文件重新嵌回索引
-        const t = this.modifyTimers.get(f.path);
-        if (t) { window.clearTimeout(t); this.modifyTimers.delete(f.path); }
-        await this.enqueueIndexOperation(async () => {
-          this.indexer.onDelete(f.path);
-          await this.indexStore.removeFile(f.path);
-        });
-      }));
-      this.registerEvent(this.app.vault.on("rename", async (file, oldPath) => {
-        // 改名/移动：内容没变，不重嵌——把索引条目改键到新路径，挪分片(删旧分片、写新分片)。
-        if (!(file instanceof TFile) || file.extension !== "md") return;
-        await this.indexReady; // 改键前确保索引已加载，否则改的是空 store
-        const t = this.modifyTimers.get(oldPath);
-        if (t) { window.clearTimeout(t); this.modifyTimers.delete(oldPath); }
-        await this.enqueueIndexOperation(async () => {
-          this.store.renameFile(oldPath, file.path);
-          await this.indexStore.removeFile(oldPath);
-          await this.indexStore.saveFile(file.path);
-          this.indexer.recordChange(file.path);
-        });
-      }));
-    }
-
-    // 选中文本 → 引用进 Cobrain（右键菜单；仅编辑模式有 editor 时出现，移动端编辑模式同样可用）
+    this.addRibbonIcon("brain", "副脑", () => void this.revealOrOpenChatView().catch(e => this.reportError(e)));
+    this.addCommand({ id: "open-tutor", name: "打开副脑", callback: () => void this.revealOrOpenChatView().catch(e => this.reportError(e)) });
+    this.addCommand({ id: "new-conversation", name: "新建对话", callback: () => void this.startConversation().catch(e => this.reportError(e)) });
+    this.addCommand({ id: "open-new-chat", name: "新开一个对话面板", callback: () => void this.openNewChatView().catch(e => this.reportError(e)) });
+    this.addCommand({ id: "reindex", name: "重建允许范围的索引", callback: () => void this.rebuildIndex().catch(e => this.reportError(e)) });
+    this.addCommand({ id: "test-retrieval", name: "手动检索资料", callback: () => this.openRetrievalTest() });
+    this.addCommand({ id: "index-status", name: "查看索引状态", callback: () => void this.showIndexStatus().catch(e => this.reportError(e)) });
+    this.addCommand({ id: "quote-selection", name: "讨论选中文本", editorCallback: (editor, ctx) => void this.quoteSelection(editor, ctx).catch(e => this.reportError(e)) });
+    this.registerEvent(this.app.workspace.on("file-open", file => {
+      if (file?.extension === "md") this.lastDocumentPath = file.path;
+    }));
     this.registerEvent(this.app.workspace.on("editor-menu", (menu, editor, ctx) => {
       if (!editor.getSelection().trim()) return;
-      menu.addItem(item =>
-        item.setTitle("引用进 Cobrain").setIcon("brain").onClick(() => void this.quoteSelection(editor, ctx)),
-      );
+      menu.addItem(item => item.setTitle("与副脑讨论选文").setIcon("brain")
+        .onClick(() => void this.quoteSelection(editor, ctx).catch(e => this.reportError(e))));
     }));
-
-    // onload 已把视图/命令/事件全部接好，最后才后台启动索引加载——onload 不被它阻塞，告警消失。
-    this.indexReady = this.loadIndex();
-  }
-
-  // 后台加载索引分片 + 换模型检测。onload 不 await 它（只存其 Promise 供检索/重嵌前 await）。
-  private async loadIndex(): Promise<void> {
-    // 先等布局就绪：索引加载有 ~130ms 同步主线程工作（解析 + 反量化），别在「打开软件」的启动窗口里抢主线程，
-    // 让 Obsidian 先渲染可用，重活儿挪到 app 已经能用之后再做。
-    await new Promise<void>(resolve => this.app.workspace.onLayoutReady(resolve));
-    if (this.disposed) return;
-    const storedModel = await this.indexStore.load({
-      legacyDataIndex: this.legacyDataIndex,
-      onMigratedLegacyDataIndex: async () => {
-        this.legacyDataIndex = undefined;
-        await this.saveSettings();
-      },
-    });
-    if (this.disposed) return; // 加载期间插件被卸载：不再动设置/盘
-    if (storedModel && storedModel !== this.settings.embedModel) {
-      // 换过嵌入模型 → 维度/空间不兼容，清空待重建
-      if (Platform.isMobile) {
-        new Notice("嵌入模型已变更；移动端只读，请在桌面端重建索引");
-      } else {
-        await this.resetIndexForEmbedModelChange();
-        new Notice("嵌入模型已变更，旧索引已清空，请重新「Cobrain: 重建索引」");
+    this.app.workspace.onLayoutReady(() => {
+      this.app.workspace.detachLeavesOfType("lt-chat");
+      const file = this.app.workspace.getActiveFile();
+      if (file?.extension === "md") this.lastDocumentPath = file.path;
+      if (!Platform.isMobile) {
+        this.registerEvent(this.app.vault.on("create", f => { if (f instanceof TFile && f.extension === "md") this.scheduleReindex(f); }));
       }
+    });
+    if (!Platform.isMobile) {
+      this.registerEvent(this.app.vault.on("modify", f => { if (f instanceof TFile && f.extension === "md") this.scheduleReindex(f); }));
     }
-    this.indexLoaded = true;
+    // 文档改名同步更新会话材料；选区内容仍保留原文快照。移动端也需要维护这些引用。
+    this.registerEvent(this.app.vault.on("rename", (file, oldPath) => {
+      if (!(file instanceof TFolder) && (!(file instanceof TFile) || file.extension !== "md")) return;
+      if (this.lastDocumentPath === oldPath || this.lastDocumentPath?.startsWith(`${oldPath}/`)) {
+        this.lastDocumentPath = file.path + this.lastDocumentPath.slice(oldPath.length);
+      }
+      void this.updateMaterialPaths(oldPath, file.path).catch(e => this.reportError(e));
+      if (Platform.isMobile || !this.settings.indexEnabled) return;
+      this.clearModifyTimer(oldPath);
+      void this.whenIndexReady().then(() => this.enqueueIndexOperation(async () => {
+        const oldPaths = this.store.allPaths().filter(path => path === oldPath || path.startsWith(`${oldPath}/`));
+        for (const previous of oldPaths) {
+          const next = file.path + previous.slice(oldPath.length);
+          if (shouldIndexPath(next, this.settings)) {
+            this.store.renameFile(previous, next); await this.indexStore.saveFile(next);
+          } else this.store.removeFile(previous);
+          await this.indexStore.removeFile(previous);
+        }
+        if (file instanceof TFile && shouldIndexPath(file.path, this.settings) && this.store.getMtime(file.path) === null) this.scheduleReindex(file);
+        this.indexer.recordChange(file.path);
+      })).catch(e => this.reportError(e));
+    }));
+    if (!Platform.isMobile) {
+      this.registerEvent(this.app.vault.on("delete", f => {
+        for (const path of this.modifyTimers.keys()) if (path === f.path || path.startsWith(`${f.path}/`)) this.clearModifyTimer(path);
+        if (!this.indexReady) return;
+        void this.whenIndexReady().then(() => this.enqueueIndexOperation(async () => {
+          for (const path of this.store.allPaths()) {
+            if (path !== f.path && !path.startsWith(`${f.path}/`)) continue;
+            this.indexer.onDelete(path); await this.indexStore.removeFile(path);
+          }
+        })).catch(e => this.reportError(e));
+      }));
+    }
+    // 文档对话不加载索引、不请求嵌入；首次明确检索或允许范围内的编辑才延迟加载。
   }
 
-  onunload() {
-    // 卸载前把可能仍在防抖窗口里的草稿冲一次盘（in-memory 已是最新）
-    this.flushDrafts();
-    // 清掉所有挂起的防抖重嵌定时器：用的是裸 setTimeout（非 registerInterval），
-    // 不主动清的话，插件卸载/更新后回调仍会 fire，对已卸载实例 saveData。
-    this.disposed = true;
-    for (const t of this.modifyTimers.values()) window.clearTimeout(t);
-    this.modifyTimers.clear();
-  }
-
-  // data.json 现在只存设置；向量索引在 index/ 分片里（见 IndexStore）。
-  async loadSettings() {
+  async loadSettings(): Promise<void> {
     const data = await this.loadData();
     const normalized = normalizeSettingsData(data);
     this.settings = normalized.settings;
     this.legacyDataIndex = normalized.legacyIndex;
-    const source = data && typeof data === "object" && "chatDrafts" in data
-      ? (data as Record<string, unknown>).chatDrafts
-      : undefined;
-    this.chatDrafts = normalizeChatDrafts(source);
+    const raw = data && typeof data === "object" ? data as Record<string, unknown> : {};
+    this.legacyDrafts = raw.chatDrafts;
+    this.sessionsMigrated = raw.sessionsMigrated === true;
+    this.lastSessionId = typeof raw.lastSessionId === "string" ? raw.lastSessionId : null;
   }
-
-  // 只写设置（极小）。索引在 index/ 分片里，与设置彻底解耦。
-  async saveSettings() {
-    await this.saveData({ settings: this.settings, chatDrafts: this.chatDrafts });
+  saveSettings(): Promise<void> {
+    const run = this.settingsQueue.catch(() => undefined).then(() => this.saveData({
+      settings: this.settings, lastSessionId: this.lastSessionId, sessionsMigrated: this.sessionsMigrated,
+      // 保留原草稿作为迁移备份，但不再修改或恢复它们；删除新会话不会使旧草稿复活。
+      ...(this.legacyDrafts ? { chatDrafts: this.legacyDrafts } : {}),
+      ...(this.legacyDataIndex ? { index: this.legacyDataIndex } : {}),
+    }));
+    this.settingsQueue = run;
+    return run;
   }
-
-  chatWelcomeText(): string {
-    const chatProblem = this.chatConfigProblem();
-    if (chatProblem) return `${chatProblem} 配好后再开始对话。`;
-    const missingEmbed = this.embedConfigProblem();
-    if (missingEmbed) return `${missingEmbed} 现在只能普通对话，不能翻旧笔记。`;
-    if (!this.indexLoaded) return "索引正在加载。现在可以先普通对话，加载完后会检索旧笔记。";
-    if (this.store.allPaths().length === 0) {
-      // 移动端只读：跑「重建索引」只会得到「请在桌面端重建」，别把用户指进死路
-      return Platform.isMobile
-        ? "索引还是空的。请先在桌面端运行「Cobrain: 重建索引」，索引会随 vault 同步到本设备。"
-        : "索引还是空的。先运行「Cobrain: 重建索引」，否则我翻不出你写过的旧笔记。";
+  currentDocument(): TFile | null {
+    const active = this.app.workspace.getActiveFile();
+    if (active?.extension === "md") this.lastDocumentPath = active.path;
+    const file = this.lastDocumentPath ? this.app.vault.getAbstractFileByPath(this.lastDocumentPath) : null;
+    return file instanceof TFile && file.extension === "md" ? file : null;
+  }
+  documentReference(file: TFile): MaterialReference {
+    return { id: `document:${file.path}`, path: file.path, kind: "document", origin: "unknown" };
+  }
+  async createSession(): Promise<ChatSession> {
+    const file = this.currentDocument();
+    const session = newSession(file ? [this.documentReference(file)] : []);
+    await this.sessions.save(session);
+    return session;
+  }
+  async initialSession(viewType = VIEW_TYPE_COBRAIN_CHAT): Promise<ChatSession> {
+    const legacy = viewType.match(/-(\d+)$/);
+    const id = legacy && this.sessions.has(`legacy-${legacy[1]}`) ? `legacy-${legacy[1]}` : this.lastSessionId;
+    if (id && this.sessions.has(id)) return this.sessions.get(id);
+    const latest = this.sessions.list()[0];
+    return latest ? this.sessions.get(latest.id) : this.createSession();
+  }
+  async rememberSession(id: string): Promise<void> {
+    this.lastSessionId = id;
+    await this.saveSettings();
+  }
+  acquireSessionRequest(id: string): (() => void) | null {
+    if (this.sessionRequests.has(id)) return null;
+    const token = Symbol(id);
+    this.sessionRequests.set(id, token);
+    return () => { if (this.sessionRequests.get(id) === token) this.sessionRequests.delete(id); };
+  }
+  async persistSession(session: ChatSession, immediate = true): Promise<void> {
+    session.updatedAt = Date.now();
+    if (session.title === "新对话") {
+      const first = session.history.find(m => m.role === "user")?.content.trim();
+      if (first) session.title = first.split("\n").find(Boolean)?.replace(/^>\s*/, "").slice(0, 50) || "新对话";
     }
-    return "聊你正在想的。我会翻出你写过的相关旧笔记，并回抛问题逼你自己想。下方：概念图 / 推敲 / 配图 / 存为笔记。";
+    const pending = this.sessionTimers.get(session.id);
+    if (pending) { window.clearTimeout(pending.timer); this.sessionTimers.delete(session.id); }
+    if (immediate) await this.sessions.save(session);
+    else {
+      const timer = window.setTimeout(() => {
+        this.sessionTimers.delete(session.id);
+        void this.sessions.save(session).catch(e => this.reportError(e));
+      }, 450);
+      this.sessionTimers.set(session.id, { timer, session });
+    }
   }
-
-  // 空状态该给哪些行动按钮（chatView 的 welcome 区渲染）：文案指路不如按钮直达。
-  welcomeActions(): { openSettings: boolean; rebuildIndex: boolean } {
-    const configMissing = !!(this.chatConfigProblem() || this.embedConfigProblem());
-    const rebuild =
-      !Platform.isMobile && !configMissing && this.indexLoaded && this.store.allPaths().length === 0;
-    return { openSettings: configMissing, rebuildIndex: rebuild };
+  async flushSessions(): Promise<void> {
+    for (const { timer, session } of this.sessionTimers.values()) {
+      window.clearTimeout(timer);
+      await this.sessions.save(session);
+    }
+    this.sessionTimers.clear();
+    await this.sessions.flush();
   }
-
-  // 直达本插件设置页。app.setting 是未公开 API，社区插件通行做法（typings 里没有，运行时稳定存在）。
-  openPluginSettings(): void {
-    const setting = (this.app as unknown as {
-      setting?: { open(): void; openTabById(id: string): void };
-    }).setting;
-    if (!setting) { new Notice("请在 设置 → 第三方插件 → Cobrain 中配置"); return; }
-    setting.open();
-    setting.openTabById(this.manifest.id);
+  async deleteSession(id: string): Promise<void> {
+    const views = this.chatViews().filter(view => view.sessionId === id);
+    for (const view of views) view.stop();
+    await Promise.all(views.map(view => view.waitForCompletion()));
+    const pending = this.sessionTimers.get(id);
+    if (pending) { window.clearTimeout(pending.timer); this.sessionTimers.delete(id); }
+    await this.sessions.delete(id);
+    if (this.lastSessionId === id) this.lastSessionId = null;
+    await this.saveSettings();
+    if (views.length) {
+      const latest = this.sessions.list()[0];
+      const replacement = latest ? await this.sessions.get(latest.id) : await this.createSession();
+      for (const view of views) await view.replaceDeletedSession(id, replacement);
+    }
   }
-
-  // 全量重建索引：命令、welcome 空状态按钮共用。
-  async rebuildIndex(): Promise<void> {
-    // 移动端为只读检索：不重建（避免蜂窝网重嵌 + 改写索引引发同步冲突），索引在桌面端建。
-    if (Platform.isMobile) { new Notice("移动端为只读检索，索引请在桌面端重建"); return; }
-    await this.indexReady; // 别在索引还没加载完时就重建（否则会把所有文件当"新文件"全量重嵌）
-    void this.enqueueIndexOperation(() => this.indexer.reindexAll(this.indexStore, this.settings.embedModel, { force: true }));
+  private chatViews(): ChatView[] {
+    const views: ChatView[] = [];
+    this.app.workspace.iterateAllLeaves(leaf => { if (leaf.view instanceof ChatView) views.push(leaf.view); });
+    return views;
   }
-
-  // 检索校准入口：命令、设置页「检索最低分」旁的按钮共用。
-  openRetrievalTest(): void {
-    new QueryModal(this.app, (q) => void this.showRetrieval(q)).open();
+  async openSession(id: string, preferred?: ChatView): Promise<void> {
+    const already = this.chatViews().find(v => v.sessionId === id);
+    if (already) { await this.app.workspace.revealLeaf(already.leaf); return; }
+    const view = preferred ?? this.chatViews()[0];
+    if (view) {
+      await view.openSession(await this.sessions.get(id));
+      await this.app.workspace.revealLeaf(view.leaf);
+    } else await this.openLeaf(await this.sessions.get(id));
   }
-
-  whenIndexReady(): Promise<void> {
-    return this.indexReady;
+  async startConversation(preferred?: ChatView): Promise<void> {
+    const session = await this.createSession();
+    await this.openSession(session.id, preferred);
+  }
+  async openNewChatView(): Promise<void> {
+    const session = await this.createSession();
+    if (Platform.isMobile && this.chatViews().length) await this.openSession(session.id, this.chatViews()[0]);
+    else await this.openLeaf(session);
+  }
+  private async openLeaf(session: ChatSession): Promise<WorkspaceLeaf | null> {
+    const leaf = this.app.workspace.getRightLeaf(false);
+    if (!leaf) { new Notice("无法打开侧栏面板"); return null; }
+    await leaf.setViewState({ type: VIEW_TYPE_COBRAIN_CHAT, state: { sessionId: session.id }, active: true });
+    if (leaf.view instanceof ChatView) await leaf.view.openSession(session);
+    await this.app.workspace.revealLeaf(leaf);
+    return leaf;
+  }
+  async revealOrOpenChatView(): Promise<void> {
+    const views = this.chatViews();
+    const view = views.find(v => v.sessionId === this.lastSessionId) ?? views[0];
+    if (view) await this.app.workspace.revealLeaf(view.leaf);
+    else await this.openLeaf(await this.initialSession());
+  }
+  async activateChatView(): Promise<ChatView | null> {
+    await this.revealOrOpenChatView();
+    return this.chatViews().find(v => v.sessionId === this.lastSessionId) ?? this.chatViews()[0] ?? null;
+  }
+  private async quoteSelection(editor: Editor, ctx: MarkdownFileInfo): Promise<void> {
+    const text = editor.getSelection();
+    if (!text.trim() || !ctx.file) return;
+    this.lastDocumentPath = ctx.file.path;
+    const heading = findHeadingAbove(editor.getValue().split("\n"), editor.getCursor("from").line) ?? undefined;
+    const reference: MaterialReference = {
+      id: `selection:${Date.now().toString(36)}:${Math.random().toString(36).slice(2, 8)}`,
+      path: ctx.file.path, kind: "selection", origin: "unknown", text, heading,
+    };
+    const view = await this.activateChatView();
+    view?.quoteIntoInput(buildQuote(text, this.app.metadataCache.fileToLinktext(ctx.file, "", true), heading ?? null), reference);
+  }
+  private async updateMaterialPaths(oldPath: string, path: string): Promise<void> {
+    for (const info of this.sessions.list()) {
+      const session = await this.sessions.get(info.id);
+      let changed = false;
+      for (const material of session.materials) {
+        if (material.path === oldPath || material.path.startsWith(`${oldPath}/`)) {
+          material.path = path + material.path.slice(oldPath.length);
+          if (material.kind === "document") material.id = `document:${material.path}`;
+          changed = true;
+        }
+      }
+      session.sources = session.sources.map(source => source === oldPath || source.startsWith(`${oldPath}/`) ? path + source.slice(oldPath.length) : source);
+      if (changed) await this.persistSession(session);
+    }
+    for (const view of this.chatViews()) view.refreshSessionHeader();
   }
 
   chatConfigProblem(): string | null {
     const s = this.settings;
-    if (!s.llmBaseUrl || !s.llmKey || !s.llmModel) return "请先在设置里配好文本 LLM 的 Base URL、API Key 和 Model。";
-    return null;
+    return !s.llmBaseUrl || !s.llmKey || !s.llmModel ? "请先在设置中配置文本模型的地址、密钥和模型名称。" : null;
   }
-
   embedConfigProblem(): string | null {
     const s = this.settings;
-    if (!s.embedBaseUrl || !s.embedKey || !s.embedModel) return "请先在设置里配好嵌入 API 的 Base URL、API Key 和 Model。";
-    return null;
+    return !s.embedBaseUrl || !s.embedKey || !s.embedModel ? "请先在可选资料检索设置中配置嵌入端点。" : null;
   }
-
-  getChatDraft(id: number): ChatDraft | null {
-    return this.chatDrafts[id] ?? null;
+  openPluginSettings(): void {
+    const setting = (this.app as unknown as { setting?: { open(): void; openTabById(id: string): void } }).setting;
+    if (!setting) { new Notice("请在设置 → 第三方插件 → Cobrain 中配置"); return; }
+    setting.open(); setting.openTabById(this.manifest.id);
   }
-
-  clearChatDraft(id: number): void {
-    delete this.chatDrafts[id];
-    this.saveDraftsDebounced();
+  async whenIndexReady(): Promise<void> {
+    if (!this.settings.indexEnabled) return;
+    if (!this.indexReady) this.indexReady = this.loadIndex().catch(e => { this.indexReady = null; throw e; });
+    await this.indexReady;
   }
-
-  // 强制把草稿(及设置)立刻落盘：先取消仍在防抖窗口里的回调再写，避免「冲一次之后防抖又多写一次」。
-  // 面板关闭(onClose)/插件卸载(onunload)时调用。
-  flushDrafts(): void {
-    this.saveDraftsDebounced.cancel();
-    this.saveSettingsDebounced.cancel();
-    void this.saveSettings();
-  }
-
-  saveChatDraft(id: number, draft: Omit<ChatDraft, "savedAt">): void {
-    if (!draft.history.length) delete this.chatDrafts[id];
-    else {
-      // history 截到最近 80 条时，摘要的 coveredCount 要按被丢弃的条数平移，否则恢复后覆盖边界错位
-      const dropped = Math.max(0, draft.history.length - 80);
-      this.chatDrafts[id] = {
-        ...draft,
-        history: draft.history.slice(-80),
-        sources: draft.sources.slice(0, 80),
-        contextSummary: draft.contextSummary
-          ? { text: draft.contextSummary.text, coveredCount: Math.max(0, draft.contextSummary.coveredCount - dropped) }
-          : null,
-        savedAt: Date.now(),
-      };
-    }
-    this.saveDraftsDebounced();
-  }
-
-  async resetIndexForEmbedModelChange(): Promise<void> {
-    await this.enqueueIndexOperation(async () => {
-      this.store.deserialize(null);
-      await this.indexStore.clearAll();
+  private async loadIndex(): Promise<void> {
+    await new Promise<void>(resolve => this.app.workspace.onLayoutReady(resolve));
+    if (this.disposed) return;
+    const model = await this.indexStore.load({
+      legacyDataIndex: this.legacyDataIndex,
+      onMigratedLegacyDataIndex: async () => { this.legacyDataIndex = undefined; await this.saveSettings(); },
     });
+    if (model && model !== this.settings.embedModel) {
+      this.store.deserialize(null);
+      if (!Platform.isMobile) await this.indexStore.clearAll();
+      new Notice("嵌入模型与索引不一致，已停用旧索引。请在桌面端重建允许范围的索引。");
+    }
+    for (const path of this.store.allPaths()) {
+      if (!shouldIndexPath(path, this.settings) || !(this.app.vault.getAbstractFileByPath(path) instanceof TFile)) this.store.removeFile(path);
+    }
+    this.indexLoaded = true;
   }
-
+  async indexScopeChanged(): Promise<void> {
+    await this.saveSettings();
+    if (this.indexReady) {
+      await this.indexReady;
+      await this.enqueueIndexOperation(async () => {
+        for (const path of this.store.allPaths()) {
+          if (!shouldIndexPath(path, this.settings)) {
+            this.store.removeFile(path);
+            if (!Platform.isMobile) await this.indexStore.removeFile(path);
+          }
+        }
+      });
+    }
+  }
+  async resetIndexForEmbedModelChange(): Promise<void> {
+    if (this.indexReady) await this.indexReady.catch(() => undefined);
+    await this.enqueueIndexOperation(async () => { this.store.deserialize(null); await this.indexStore.clearAll(); });
+    this.indexReady = null; this.indexLoaded = false;
+  }
+  async rebuildIndex(): Promise<void> {
+    if (Platform.isMobile) { new Notice("请在桌面端重建索引；文档对话无需索引。 "); return; }
+    if (!this.settings.indexEnabled || !parseFolders(this.settings.indexIncludeFolders).length) {
+      new Notice("先在高级设置中启用可选索引，并明确填写允许索引的目录。"); return;
+    }
+    const problem = this.embedConfigProblem();
+    if (problem) { new Notice(problem); return; }
+    await this.whenIndexReady();
+    await this.enqueueIndexOperation(() => this.indexer.reindexAll(this.indexStore, this.settings.embedModel, { force: true }));
+  }
+  async searchNotes(query: string, scope: RetrievalScope): Promise<QueryHit[]> {
+    if (!this.settings.indexEnabled || !parseFolders(this.settings.indexIncludeFolders).length) {
+      throw new Error("可选索引尚未启用。请先指定允许目录并在桌面端建立索引；也可以直接添加文档，无需检索。");
+    }
+    const problem = this.embedConfigProblem();
+    if (problem) throw new Error(problem);
+    const hits = await this.retriever.retrieve(query, 12, scope);
+    return hits.filter(hit => this.app.vault.getAbstractFileByPath(hit.path) instanceof TFile);
+  }
+  openRetrievalTest(): void { new RetrievalModal(this.app, this).open(); }
+  async showIndexStatus(): Promise<void> {
+    if (this.settings.indexEnabled) await this.whenIndexReady();
+    const status = this.indexer.getStatus();
+    new IndexStatusModal(this.app, {
+      ...status, indexedFiles: this.store.allPaths().length, chunks: this.store.entryCount(),
+      embedModel: this.settings.embedModel || "未配置",
+    }).open();
+  }
+  private scheduleReindex(file: TFile): void {
+    if (!shouldIndexPath(file.path, this.settings) || this.embedConfigProblem()) return;
+    this.clearModifyTimer(file.path);
+    this.modifyTimers.set(file.path, window.setTimeout(() => {
+      this.modifyTimers.delete(file.path);
+      if (this.disposed || !shouldIndexPath(file.path, this.settings)) return;
+      void this.whenIndexReady().then(() => this.enqueueIndexOperation(() => this.indexer.onModify(file, this.indexStore)))
+        .catch(e => { this.indexer.recordFailure(file.path, e); this.reportError(e); });
+    }, 2500));
+  }
+  private clearModifyTimer(path: string): void {
+    const timer = this.modifyTimers.get(path);
+    if (timer) window.clearTimeout(timer);
+    this.modifyTimers.delete(path);
+  }
   private enqueueIndexOperation<T>(op: () => Promise<T>): Promise<T> {
     const run = this.indexQueue.catch(() => undefined).then(op);
     this.indexQueue = run.then(() => undefined, () => undefined);
     return run;
   }
-
-  // 防抖重嵌：编辑停顿约 2.5s 才嵌入变更文件。失败冒泡为 Notice，不再静默吞掉（旧代码无 catch）。
-  private scheduleReindex(file: TFile): void {
-    const prev = this.modifyTimers.get(file.path);
-    if (prev) window.clearTimeout(prev);
-    this.modifyTimers.set(
-      file.path,
-      window.setTimeout(() => {
-        this.modifyTimers.delete(file.path);
-        if (this.disposed) return; // 卸载后不再写盘
-        // 先 await indexReady：避免索引还没加载完就 onModify，把条目写进半截 store
-        this.indexReady
-          .then(() => this.enqueueIndexOperation(() => this.indexer.onModify(file, this.indexStore)))
-          .catch((e) => {
-            this.indexer.recordFailure(file.path, e);
-            new Notice(`索引更新失败：${file.path}：${e instanceof Error ? e.message : String(e)}`);
-          });
-      }, 2500),
-    );
+  reportError(e: unknown): void {
+    console.error("Cobrain", e);
+    new Notice(e instanceof Error ? e.message : String(e), 8000);
   }
-
-  // Ribbon / 主命令：优先聚焦已打开的面板——用户点脑子图标的心智是「打开我的对话」，
-  // 不是「再开一个」。反复点击不再攒出 #2、#3 面板；要多开走「新开一个对话面板」命令。
-  async revealOrOpenChatView(): Promise<void> {
-    for (let i = 1; i <= this.MAX_VIEWS; i++) {
-      const leaves = this.app.workspace.getLeavesOfType(`${VIEW_TYPE_COBRAIN_CHAT}-${i}`);
-      if (leaves.length > 0) {
-        await this.app.workspace.revealLeaf(leaves[0]);
-        return;
-      }
-    }
-    await this.openNewChatView();
+  onunload(): void {
+    this.disposed = true;
+    this.saveSettingsDebounced.cancel();
+    for (const timer of this.modifyTimers.values()) window.clearTimeout(timer);
+    this.modifyTimers.clear();
+    for (const view of this.chatViews()) view.stop();
+    void this.flushSessions().catch(e => this.reportError(e));
+    void this.saveSettings().catch(e => this.reportError(e));
   }
-
-  // 打开新的对话窗口（最多 3 个）。有草稿的槽位直接恢复（onOpen 内完成），
-  // 不再弹「恢复/新建」拦路：点开面板的意图 90% 是继续，想重来用面板里的「新建」/「清空」。
-  async openNewChatView(): Promise<void> {
-    const activeIds = this.getActiveViewIdsFromWorkspace();
-    // 找第一个未使用的 ID
-    let freeId = 0;
-    for (let i = 1; i <= this.MAX_VIEWS; i++) {
-      if (!activeIds.has(i)) {
-        freeId = i;
-        break;
-      }
-    }
-
-    if (freeId === 0) {
-      new Notice(`最多同时打开 ${this.MAX_VIEWS} 个对话窗口`);
-      return;
-    }
-
-    const viewType = `${VIEW_TYPE_COBRAIN_CHAT}-${freeId}`;
-    const leaf = this.app.workspace.getRightLeaf(false);
-    if (!leaf) { new Notice("无法打开侧栏面板"); return; }
-    await leaf.setViewState({ type: viewType, active: true });
-    await this.app.workspace.revealLeaf(leaf);
-    this.activeViewIds.add(freeId);
-  }
-
-  // 获取或打开第一个对话窗口（用于「引用进 Cobrain」）
-  async activateChatView(): Promise<ChatView | null> {
-    const { workspace } = this.app;
-
-    // 优先找已打开的任意一个
-    for (let i = 1; i <= this.MAX_VIEWS; i++) {
-      const leaves = workspace.getLeavesOfType(`${VIEW_TYPE_COBRAIN_CHAT}-${i}`);
-      if (leaves.length > 0) {
-        await workspace.revealLeaf(leaves[0]);
-        return leaves[0].view instanceof ChatView ? leaves[0].view : null;
-      }
-    }
-
-    // 没有打开的，创建第一个
-    await this.openNewChatView();
-    const leaves = workspace.getLeavesOfType(`${VIEW_TYPE_COBRAIN_CHAT}-1`);
-    return leaves[0]?.view instanceof ChatView ? leaves[0].view : null;
-  }
-
-  // 释放视图 ID（ChatView 在 onClose 时调用）
-  releaseViewId(id: number): void {
-    this.activeViewIds.delete(id);
-  }
-
-  private getActiveViewIdsFromWorkspace(): Set<number> {
-    const ids = new Set<number>();
-    for (let i = 1; i <= this.MAX_VIEWS; i++) {
-      if (this.app.workspace.getLeavesOfType(`${VIEW_TYPE_COBRAIN_CHAT}-${i}`).length > 0) ids.add(i);
-    }
-    this.activeViewIds = ids;
-    return ids;
-  }
-
-  // 「测试检索」命令：跑检索并弹结果。抽成方法以便命令回调返回 void（避免把 async 直接塞进期望 void 的参数）。
-  private async showRetrieval(q: string): Promise<void> {
-    try {
-      const hits = await this.retriever.retrieve(q, 8);
-      new ResultsModal(this.app, q, hits).open();
-    } catch (e) {
-      new Notice("检索失败：" + (e instanceof Error ? e.message : String(e)));
-    }
-  }
-
-  private async showIndexStatus(): Promise<void> {
-    try {
-      await this.indexReady;
-    } catch {
-      // 状态面板仍然要能打开；失败详情通常已经在控制台。
-    }
-    const status = this.indexer.getStatus();
-    new IndexStatusModal(this.app, {
-      indexedFiles: this.store.allPaths().length,
-      chunks: this.store.entryCount(),
-      embedModel: this.settings.embedModel || "未配置",
-      running: status.running,
-      lastChangedAt: status.lastChangedAt,
-      lastFullReindexAt: status.lastFullReindexAt,
-      failures: status.failures,
-    }).open();
-  }
-
-  // 选中文本 → 引用进 Cobrain：取选区 + 来源链接 + 最近标题 + 所在小节，预填进面板（不自动发）。
-  private async quoteSelection(editor: Editor, ctx: MarkdownFileInfo): Promise<void> {
-    const sel = editor.getSelection();
-    if (!sel.trim()) { new Notice("先选中一段文字"); return; }
-    const file = ctx.file;
-    if (!file) { new Notice("无法确定来源文件"); return; }
-    const linktext = this.app.metadataCache.fileToLinktext(file, "", true);
-    const lines = editor.getValue().split("\n");
-    const fromLine = editor.getCursor("from").line;
-    const heading = findHeadingAbove(lines, fromLine);
-    const sourceContext = extractContext(lines, fromLine);
-    const view = await this.activateChatView();
-    view?.quoteIntoInput(buildQuote(sel, linktext, heading), sourceContext);
-  }
-}
-
-class QueryModal extends Modal {
-  constructor(app: App, private onSubmit: (q: string) => void) { super(app); }
-  onOpen() {
-    this.contentEl.createEl("h3", { text: "测试检索" });
-    const input = this.contentEl.createEl("input", { type: "text" });
-    input.setCssStyles({ width: "100%" });
-    input.focus();
-    input.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" && input.value.trim()) { this.close(); this.onSubmit(input.value.trim()); }
-    });
-  }
-  onClose() { this.contentEl.empty(); }
-}
-
-// 检索结果弹窗：展示分数 + 路径 + 标题 + 正文片段，便于人工判断检索质量
-class ResultsModal extends Modal {
-  constructor(app: App, private query: string, private hits: QueryHit[]) { super(app); }
-  onOpen() {
-    const { contentEl } = this;
-    contentEl.createEl("h3", { text: `检索：${this.query}` });
-    if (!this.hits.length) {
-      contentEl.createEl("p", { text: "无命中（索引为空？先「Cobrain: 重建索引」）" });
-      return;
-    }
-    this.hits.forEach((h, i) => {
-      const div = contentEl.createDiv();
-      div.setCssStyles({ margin: "0 0 12px" });
-      const head = div.createEl("div", {
-        text: `${i + 1}. ${h.score.toFixed(3)} · ${h.path}${h.heading ? " › " + h.heading : ""}`,
-      });
-      head.setCssStyles({ fontWeight: "600" });
-      const body = div.createEl("div", {
-        text: h.text.slice(0, 220) + (h.text.length > 220 ? "…" : ""),
-      });
-      body.setCssStyles({ opacity: "0.7", fontSize: "0.85em", marginTop: "2px" });
-    });
-  }
-  onClose() { this.contentEl.empty(); }
 }
 
 class IndexStatusModal extends Modal {

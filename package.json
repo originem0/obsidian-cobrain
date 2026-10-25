@@ -1,12 +1,13 @@
 {
   "name": "obsidian-cobrain",
-  "version": "0.5.5",
+  "version": "0.6.0",
   "main": "main.js",
   "scripts": {
     "dev": "node esbuild.config.mjs",
     "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
     "deploy": "npm run build && node deploy.mjs",
-    "test": "jest"
+    "test": "jest",
+    "test:ui": "node scripts/verify-ui.mjs"
   },
   "devDependencies": {
     "@types/jest": "^29.5.12",

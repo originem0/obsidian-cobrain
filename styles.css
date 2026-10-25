@@ -1,94 +1,174 @@
-/* Cobrain 对话面板：作用域类 + Obsidian 主题变量，深浅主题自动适配 */
-.cobrain-root { display: flex; flex-direction: column; height: 100%; }
-.cobrain-messages { flex: 1; overflow-y: auto; padding: 8px 10px; }
-/* Obsidian 给侧栏视图默认加了 user-select:none（防误选 UI 文字），导致对话内容无法选中复制。
-   这里显式放开消息区，让用户能选中副脑回复 / 自己的提问并 Ctrl+C 复制。 */
-.cobrain-messages, .cobrain-messages * { -webkit-user-select: text; user-select: text; }
-.cobrain-welcome { color: var(--text-muted); padding: 6px 4px 10px; font-size: 0.88em; line-height: 1.5; }
-/* 空状态行动按钮：文案指路不如按钮直达（打开设置 / 重建索引） */
-.cobrain-welcome-actions { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
-.cobrain-welcome-actions button { font-size: 0.82em; padding: 2px 10px; }
-.cobrain-restored, .cobrain-context-limit {
+/* 安静的阅读界面。继承 Obsidian 字体和主题，不加载外部资源。 */
+.cobrain-root {
+  --cobrain-gutter: 16px;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-normal);
+  font-family: var(--font-text, inherit);
+  padding: 0;
+}
+.cobrain-root *, .cobrain-root *::before, .cobrain-root *::after { box-sizing: border-box; }
+.cobrain-header {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 4px;
+  padding: 10px 10px 4px var(--cobrain-gutter);
+}
+.cobrain-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-interface, inherit);
+  font-weight: 600;
+  font-size: 0.95em;
+  letter-spacing: 0.01em;
+}
+.cobrain-root .cobrain-icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 36px;
+  height: 36px;
+  padding: 8px;
+  border: none;
+  box-shadow: none;
+  background: transparent;
   color: var(--text-muted);
-  background: var(--background-secondary);
-  border-left: 2px solid var(--interactive-accent);
-  border-radius: 4px;
-  padding: 6px 8px;
-  margin: 6px 0;
-  font-size: 0.82em;
-  line-height: 1.45;
-}
-/* 提示条在消息区外（输入区上方，始终可见），补左右留白对齐消息区内容 */
-.cobrain-context-limit { border-left-color: var(--text-warning); margin: 0 10px 6px; }
-/* 「已恢复草稿」行内的轻操作（新建对话） */
-.cobrain-inline-action { margin-left: 8px; cursor: pointer; white-space: nowrap; }
-/* 保存闭环：消息流里可点开的「已保存笔记」行 */
-.cobrain-saved-line {
-  color: var(--text-muted);
-  background: var(--background-secondary);
-  border-left: 2px solid var(--text-success);
-  border-radius: 4px;
-  padding: 6px 8px;
-  margin: 6px 0;
-  font-size: 0.82em;
-  line-height: 1.45;
-}
-.cobrain-saved-line a { cursor: pointer; }
-/* 检索空命中的弱提示 */
-.cobrain-nohit { color: var(--text-faint); font-size: 0.75em; margin: 6px 0 2px; }
-.cobrain-bar { display: flex; gap: 6px; padding: 6px 10px; flex-wrap: wrap; border-top: 1px solid var(--background-modifier-border); }
-.cobrain-bar button { font-size: 0.82em; padding: 2px 10px; }
-/* 移动端底部按钮栏更紧凑，尽量单行、少占对话正文 */
-.is-mobile .cobrain-bar { gap: 4px; padding: 5px 8px; }
-.is-mobile .cobrain-bar button { font-size: 0.78em; padding: 3px 8px; }
-/* 「新会话」在输入行的紧凑「＋」图标按钮：与发送键同排，克制、不喧宾夺主 */
-.cobrain-new-session { flex: 0 0 auto; padding: 2px 9px; font-size: 1.05em; line-height: 1.2; }
-.cobrain-inputrow { display: flex; gap: 6px; padding: 8px 10px; border-top: 1px solid var(--background-modifier-border); align-items: flex-end; }
-.cobrain-input { flex: 1; resize: none; min-height: 2.2em; max-height: 40vh; overflow-y: auto; }
-.cobrain-bubble { margin: 8px 0; padding: 8px 10px; border-radius: 8px; }
-/* 用户气泡加 accent 边：很多主题里 secondary 与 primary-alt 几乎同色，只靠底色分不出谁在说话 */
-.cobrain-bubble-user { background: var(--background-secondary); border-left: 2px solid var(--interactive-accent); }
-.cobrain-bubble-ai { background: var(--background-primary-alt); }
-.cobrain-who { font-size: 0.7em; color: var(--text-faint); margin-bottom: 4px; display: flex; justify-content: space-between; align-items: center; }
-/* AI 气泡右上角「复制」：恒显低透明（移动端没有 hover），悬停提亮 */
-.cobrain-copy { cursor: pointer; color: var(--text-faint); opacity: 0.55; }
-.cobrain-copy:hover { opacity: 1; color: var(--text-accent); }
-/* 流式增量阶段的纯文本（完成后整体换成 Markdown 渲染）：保留换行，避免长词撑破气泡 */
-.cobrain-stream { white-space: pre-wrap; word-break: break-word; line-height: 1.55; }
-.cobrain-srcline { font-size: 0.7em; color: var(--text-faint); margin-top: 6px; }
-.cobrain-related { margin: 8px 0; padding: 6px 10px; border-left: 2px solid var(--interactive-accent); background: var(--background-secondary); border-radius: 4px; }
-.cobrain-related-head { font-size: 0.7em; color: var(--text-muted); margin-bottom: 4px; cursor: pointer; user-select: none; -webkit-user-select: none; }
-/* 折叠态：只留头部一行（新一轮相关块出现时旧块自动折叠，点头部可展开） */
-.cobrain-related.is-collapsed .cobrain-related-item { display: none; }
-.cobrain-related.is-collapsed { opacity: 0.75; }
-.cobrain-related.is-collapsed .cobrain-related-head { margin-bottom: 0; }
-.cobrain-related-item { margin: 4px 0; cursor: pointer; }
-.cobrain-related-title { font-size: 0.85em; color: var(--text-accent); }
-.cobrain-related-snippet { font-size: 0.78em; color: var(--text-faint); }
-.cobrain-bubble-actions { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
-.cobrain-action-btn { font-size: 0.75em; padding: 2px 8px; opacity: 0.8; cursor: pointer; }
-.cobrain-action-btn:hover { opacity: 1; }
-/* Mermaid 图表可点击切换 */
-.cobrain-mermaid-toggle { cursor: pointer; }
-.cobrain-mermaid-toggle:hover { opacity: 0.9; }
-.cobrain-mermaid-code {
-  background: var(--background-primary);
-  padding: 12px;
-  border-radius: 4px;
-  overflow-x: auto;
-  white-space: pre-wrap;
-  font-family: var(--font-monospace);
-  font-size: 0.85em;
-  line-height: 1.5;
-}
-/* 图片缩略图 */
-.cobrain-image-thumb {
-  max-width: 300px;
-  max-height: 200px;
   cursor: pointer;
-  border-radius: 4px;
-  transition: opacity 0.2s;
 }
-.cobrain-image-thumb:hover {
-  opacity: 0.85;
+.cobrain-icon-button svg { width: 18px; height: 18px; }
+.cobrain-root .cobrain-icon-button:hover { background: var(--background-modifier-hover); color: var(--text-normal); }
+.cobrain-scope { flex: 0 0 auto; padding: 0 var(--cobrain-gutter) 10px; border-bottom: 1px solid var(--background-modifier-border); }
+.cobrain-root .cobrain-scope-button {
+  display: block;
+  max-width: 100%;
+  min-height: 30px;
+  height: auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 4px 0;
+  border: none;
+  box-shadow: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 0.8em;
+  cursor: pointer;
+  text-align: left;
 }
+.cobrain-root .cobrain-scope-button:hover { color: var(--text-accent); }
+.cobrain-reading-area { position: relative; display: flex; flex: 1 1 0; min-height: 0; min-width: 0; }
+.cobrain-messages {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  padding: 12px var(--cobrain-gutter) 24px;
+  scroll-padding-bottom: 24px;
+  overflow-anchor: auto;
+}
+.cobrain-messages, .cobrain-messages * { user-select: text; -webkit-user-select: text; }
+.cobrain-empty { padding: 12vh 0 24px; color: var(--text-muted); max-width: 32em; margin: 0 auto; }
+.cobrain-empty-title { font-size: 1.15em; line-height: 1.5; font-weight: 500; color: var(--text-normal); }
+.cobrain-empty p { line-height: 1.8; font-size: 0.9em; }
+.cobrain-bubble { margin: 0 0 22px; padding: 0; min-width: 0; }
+.cobrain-bubble-user { background: var(--background-secondary); border-radius: 8px; padding: 12px 14px; }
+.cobrain-who { display: flex; align-items: center; justify-content: space-between; min-height: 28px; margin-bottom: 4px; color: var(--text-muted); font-family: var(--font-interface, inherit); font-size: 0.75em; }
+.cobrain-root .cobrain-copy { border: none; box-shadow: none; background: transparent; color: var(--text-muted); font-size: 12px; min-height: 28px; padding: 4px 8px; cursor: pointer; }
+.cobrain-root .cobrain-copy:hover { background: var(--background-modifier-hover); color: var(--text-normal); }
+.cobrain-body { line-height: 1.75; overflow-wrap: anywhere; min-width: 0; }
+.cobrain-bubble-user .cobrain-body, .cobrain-stream { white-space: pre-wrap; }
+.cobrain-body > :first-child { margin-top: 0; }
+.cobrain-body > :last-child { margin-bottom: 0; }
+.cobrain-body pre { max-width: 100%; overflow-x: auto; white-space: pre; }
+.cobrain-body table { display: block; max-width: 100%; overflow-x: auto; }
+.cobrain-body img, .cobrain-body svg { max-width: 100%; height: auto; }
+.cobrain-status {
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 5px var(--cobrain-gutter);
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+  max-height: 44px;
+  overflow-y: auto;
+  background: var(--background-secondary);
+}
+.cobrain-composer {
+  display: flex;
+  align-items: flex-end;
+  flex: 0 0 auto;
+  gap: 10px;
+  margin: 0;
+  padding: 12px var(--cobrain-gutter) max(12px, env(safe-area-inset-bottom, 0px));
+  border-top: 1px solid var(--background-modifier-border);
+  background: var(--background-primary);
+}
+.cobrain-root .cobrain-input {
+  display: block;
+  flex: 1 1 0;
+  width: 0;
+  min-width: 0;
+  min-height: 44px;
+  max-height: min(28vh, 220px);
+  max-height: min(28dvh, 220px);
+  margin: 0;
+  padding: 9px 12px;
+  resize: none;
+  overflow-y: auto;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  font-family: var(--font-text, inherit);
+  font-size: 1em;
+  line-height: 1.5;
+  background: var(--background-secondary);
+  color: var(--text-normal);
+}
+.cobrain-root .cobrain-input:focus { border-color: var(--interactive-accent); }
+.cobrain-root .cobrain-send { flex: 0 0 auto; min-width: 58px; height: 44px; margin: 0; padding: 0 14px; border-radius: 8px; cursor: pointer; }
+.cobrain-root .cobrain-load-older { display: block; width: 100%; margin: 0 0 18px; border: none; box-shadow: none; background: transparent; color: var(--text-muted); font-size: 0.8em; cursor: pointer; min-height: 40px; }
+.cobrain-jump-bottom { position: absolute; bottom: 12px; left: 50%; transform: translateX(-50%); min-height: 36px; border-radius: 20px; box-shadow: var(--shadow-s); cursor: pointer; }
+.cobrain-retry { display: flex; align-items: flex-start; flex-wrap: wrap; gap: 10px; margin: 14px 0; color: var(--text-muted); font-size: 0.85em; line-height: 1.6; }
+.cobrain-retry button { flex-shrink: 0; }
+.cobrain-root [hidden] { display: none !important; }
+.cobrain-root button, .cobrain-material-modal button, .cobrain-save-modal button, .cobrain-retrieval-modal button { touch-action: manipulation; }
+.cobrain-root button:focus-visible, .cobrain-root textarea:focus-visible { outline: 2px solid var(--interactive-accent); outline-offset: 2px; }
+.cobrain-muted { color: var(--text-muted); font-size: 0.88em; line-height: 1.65; }
+.cobrain-modal-input { display: block; width: 100%; min-height: 40px; margin: 10px 0; }
+.cobrain-modal-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 8px; margin: 18px 0 0; }
+.cobrain-material-actions { justify-content: flex-start; margin: 12px 0; }
+.cobrain-note-preview { display: block; width: 100%; height: 36vh; min-height: 160px; line-height: 1.7; resize: vertical; margin: 12px 0; }
+.cobrain-check-row { display: flex; align-items: center; gap: 8px; min-height: 44px; cursor: pointer; }
+.cobrain-material-row { display: flex; align-items: flex-start; gap: 12px; padding: 14px 0; border-bottom: 1px solid var(--background-modifier-border); }
+.cobrain-material-description { min-width: 0; flex: 1; overflow-wrap: anywhere; }
+.cobrain-material-controls { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.cobrain-material-controls select { max-width: 150px; color: var(--text-normal); background: var(--background-secondary); }
+.cobrain-selection-preview { font-size: 0.85em; color: var(--text-muted); border-left: 2px solid var(--background-modifier-border); padding-left: 10px; margin-top: 8px; }
+.cobrain-field-label { display: flex; align-items: center; gap: 12px; margin: 16px 0 12px; }
+.cobrain-field-label select { min-width: 0; max-width: 100%; color: var(--text-normal); background: var(--background-secondary); }
+.cobrain-search-results { max-height: 42vh; overflow-y: auto; overscroll-behavior: contain; margin: 12px 0; }
+.cobrain-search-result { display: flex; align-items: flex-start; gap: 10px; padding: 12px 0; cursor: pointer; border-bottom: 1px solid var(--background-modifier-border); }
+.cobrain-search-result > div { min-width: 0; overflow-wrap: anywhere; }
+.cobrain-search-title { font-weight: 500; margin-bottom: 5px; }
+.is-mobile .cobrain-root { --cobrain-gutter: 14px; }
+.is-mobile .cobrain-header { padding-top: 6px; }
+.is-mobile .cobrain-root .cobrain-icon-button { width: 44px; height: 44px; }
+.is-mobile .cobrain-root .cobrain-scope-button { min-height: 36px; font-size: 13px; }
+.is-mobile .cobrain-scope { padding-bottom: 4px; }
+.is-mobile .cobrain-root .cobrain-copy { min-height: 36px; }
+.is-mobile .cobrain-composer { gap: 8px; padding-top: 10px; }
+.is-mobile .cobrain-root .cobrain-input { font-size: 16px; max-height: min(24vh, 160px); max-height: min(24dvh, 160px); }
+.is-mobile .cobrain-material-row { flex-direction: column; gap: 10px; }
+.is-mobile .cobrain-material-controls { width: 100%; justify-content: space-between; }
+.is-mobile .cobrain-material-controls button, .is-mobile .cobrain-modal-actions button { min-height: 44px; }
+@media (prefers-reduced-motion: reduce) { .cobrain-root * { scroll-behavior: auto !important; } }

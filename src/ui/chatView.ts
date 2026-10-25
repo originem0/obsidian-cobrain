@@ -1,1013 +1,476 @@
-import { ItemView, WorkspaceLeaf, MarkdownRenderer, Notice, TFile, Menu, normalizePath } from "obsidian";
-import type { ChatMsg } from "../llm/chatClient";
-import type { QueryHit } from "../rag/vectorStore";
-import { saveNote, saveImage } from "../noteWriter";
-import { extractMermaid } from "../util/mermaid";
-import { fnv1a } from "../util/hash";
-import { CancelledError, makeCancellable } from "../util/cancellable";
-import { SUMMARY_HISTORY_LIMIT } from "../tutor/tutor";
+import { Component, ItemView, WorkspaceLeaf, MarkdownRenderer, Notice, Menu, Platform, setIcon } from "obsidian";
+import type { ViewStateResult } from "obsidian";
 import type CobrainPlugin from "../main";
-import type { SavedNoteState, ContextSummaryState } from "../main";
-import { askPrompt, askTextArea, askConfirm, askSaveOptions } from "./modals";
+import type { ChatSession, MaterialReference } from "../chat/session";
+import { conversationMarkdown } from "../chat/session";
+import { readMaterials } from "../chat/materials";
+import type { ContextOpts } from "../tutor/tutor";
+import { fnv1a } from "../util/hash";
+import { extractMermaid } from "../util/mermaid";
+import { makeCancellable, CancelledError } from "../util/cancellable";
+import { saveNote, saveConversation } from "../noteWriter";
+import { askConfirm, askPrompt, askSaveOptions } from "./modals";
+import { SessionPicker, MaterialModal } from "./sessionModals";
+import { RetrievalModal } from "./retrievalModal";
 
 export const VIEW_TYPE_COBRAIN_CHAT = "cobrain-chat";
-
-const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e));
-const CHAT_CONTEXT_MSG_LIMIT = 20;
-// 滚动摘要攒批阈值：窗口外未覆盖的消息不足这个数就先不总结，避免每来一条就打一次摘要请求
-const SUMMARY_BATCH_MIN = 6;
-
-export function chatStateSignature(
-  history: ChatMsg[],
-  sources: string[],
-  mermaid: string | null,
-  imageEmbed: string | null,
-): string {
-  return fnv1a(JSON.stringify({
-    history,
-    sources: [...sources].sort(),
-    mermaid,
-    imageEmbed,
-  }));
+export function shouldSendOnEnter(event: Pick<KeyboardEvent, "key" | "shiftKey" | "ctrlKey" | "metaKey" | "isComposing" | "keyCode">, mobile: boolean, composing = false): boolean {
+  return event.key === "Enter" && !event.isComposing && !composing && event.keyCode !== 229
+    && !event.shiftKey && (!mobile || event.ctrlKey || event.metaKey);
 }
-
-export function chatHistoryForModel(history: ChatMsg[]): ChatMsg[] {
-  return history.slice(-CHAT_CONTEXT_MSG_LIMIT);
+export function nearBottom(el: { scrollHeight: number; scrollTop: number; clientHeight: number }): boolean {
+  return el.scrollHeight - el.scrollTop - el.clientHeight < 72;
 }
-
-// 截断提示随摘要状态分档：全覆盖 / 部分覆盖（摘要在攒批或更新中）/ 尚无摘要。
-export function chatContextLimitText(historyLength: number, summarizedCount = 0): string | null {
-  const overflow = historyLength - CHAT_CONTEXT_MSG_LIMIT;
-  if (overflow <= 0) return null;
-  if (summarizedCount >= overflow) return `更早的 ${overflow} 条消息已压缩成滚动摘要，随本轮对话一起发给模型。`;
-  if (summarizedCount > 0) return `更早的 ${overflow} 条消息中 ${summarizedCount} 条已压缩成滚动摘要；其余 ${overflow - summarizedCount} 条待下次压缩，本轮不发给模型。`;
-  return `更早的 ${overflow} 条消息暂未发给模型（对话继续时会自动压缩成滚动摘要）。`;
-}
-
-// 摘要批计算（纯函数）：返回本次应并入摘要的 history 区间 [from, to)，不足攒批阈值返回 null。
-// to 恒为「窗口左边界」——只总结已滑出 20 条窗口的消息，窗口内的始终原文发送、不摘要。
-export function summaryUpdatePlan(
-  historyLength: number,
-  coveredCount: number,
-  windowLimit = CHAT_CONTEXT_MSG_LIMIT,
-  batchMin = SUMMARY_BATCH_MIN,
-): { from: number; to: number } | null {
-  const overflowEnd = historyLength - windowLimit;
-  if (overflowEnd - coveredCount < batchMin) return null;
-  return { from: coveredCount, to: overflowEnd };
-}
-
-export interface SaveSnapshot {
-  history: ChatMsg[];
-  sources: string[];
-  mermaid: string | null;
-  imageEmbed: string | null;
-}
-
-// 保存成功后的状态消费（纯函数）：只清掉本次快照真正用掉的产物——
-// 保存弹窗/出图期间用户继续聊天或重新生成的新产物不能被误清。
-// 不变量：保存后若用户未再改动，当前状态签名 chatStateSignature(history, [...sources], mermaid, image)
-// 与这里记录的 lastSavedNote.stateSignature 相等，重复点「存为笔记」命中去重。
-// 若改动清空口径，务必同步签名参数，否则去重会失效或误判。
-export function consumeSavedSnapshot(
-  current: { lastMermaid: string | null; lastImageEmbed: string | null },
-  snapshot: SaveSnapshot,
-  path: string,
-  savedAt: number,
-): { lastMermaid: string | null; lastImageEmbed: string | null; consumedSources: string[]; lastSavedNote: SavedNoteState } {
-  return {
-    lastMermaid: current.lastMermaid === snapshot.mermaid ? null : current.lastMermaid,
-    lastImageEmbed: current.lastImageEmbed === snapshot.imageEmbed ? null : current.lastImageEmbed,
-    consumedSources: snapshot.sources,
-    lastSavedNote: {
-      stateSignature: chatStateSignature(snapshot.history, [], null, null),
-      path,
-      savedAt,
-    },
-  };
-}
-
-// 带秒数计时的 Notice：用于构思配图主题/扩写提示词/整理笔记等不在气泡里展示的等待。
-function timedNotice(label: string): { notice: Notice; stop: () => void } {
-  const start = Date.now();
-  const notice = new Notice(`${label} 0s`, 0);
-  const timer = window.setInterval(() => {
-    notice.setMessage(`${label} ${Math.floor((Date.now() - start) / 1000)}s`);
-  }, 1000);
-  return { notice, stop: () => { window.clearInterval(timer); notice.hide(); } };
-}
-
-function isUnderFolder(path: string, folder: string): boolean {
-  const p = normalizePath(path);
-  const f = normalizePath(folder).replace(/\/+$/, "");
-  return !!f && p.startsWith(f + "/");
-}
-
-// 流式回答气泡的控制柄（见 ChatView.streamingBubble）
-interface StreamBubble {
-  el: HTMLElement;
-  append: (text: string) => void;
-  finish: (fullText: string) => Promise<void>;
-  remove: () => void;
+export function sessionSignature(session: ChatSession): string {
+  return fnv1a(JSON.stringify({ history: session.history, materials: session.materials, mermaid: session.lastMermaid }));
 }
 
 export class ChatView extends ItemView {
-  private history: ChatMsg[] = [];
-  private sources = new Set<string>();
-  private lastMermaid: string | null = null;
-  private lastImageEmbed: string | null = null;
-  private lastSavedNote: SavedNoteState | null = null;
-  private contextSummary: ContextSummaryState | null = null;
-  // 清空/关闭面板时 +1：使在途的后台摘要任务作废，避免迟到结果写进已清空的对话或已关闭的面板
-  private summaryGen = 0;
-  private summaryInFlight = false;
+  private session: ChatSession | null = null;
   private messagesEl!: HTMLElement;
-  private welcomeEl!: HTMLElement;
-  private contextLimitEl!: HTMLElement;
+  private olderBtn!: HTMLButtonElement;
+  private titleEl!: HTMLElement;
+  private materialBtn!: HTMLButtonElement;
+  private statusEl!: HTMLElement;
   private inputEl!: HTMLTextAreaElement;
   private sendBtn!: HTMLButtonElement;
-  private actionButtons: HTMLButtonElement[] = [];
-  private saveNoteBtn!: HTMLButtonElement;
-  private busy = false; // 一次只跑一轮 ask，避免连发导致 history 交错
-  private currentCancel: (() => void) | null = null; // 「停止」按钮：拒绝当前在途请求（UI 立即解锁）
-  private currentAbort: AbortController | null = null; // 「停止」同时中止底层 fetch（流式路径真正停掉请求）
-  private pendingSourceContexts: string[] = []; // 引用带来的源笔记小节，只喂给紧接着的那一问
-  private instanceId: number; // 实例 ID（1/2/3）
+  private bottomBtn!: HTMLButtonElement;
+  private composing = false;
+  private sending = false;
+  private switchTicket = 0;
+  private busy = false;
+  private closed = false;
+  private generation = 0;
+  private renderedFrom = 0;
+  private following = true;
+  private currentAbort: AbortController | null = null;
+  private currentCancel: (() => void) | null = null;
+  private currentTask: Promise<void> | null = null;
+  private renderers = new Map<HTMLElement, Component>();
 
-  constructor(leaf: WorkspaceLeaf, private plugin: CobrainPlugin, instanceId: number = 1) {
-    super(leaf);
-    this.instanceId = instanceId;
-  }
-
-  getViewType(): string { return `${VIEW_TYPE_COBRAIN_CHAT}-${this.instanceId}`; }
-  getDisplayText(): string { return `创作副脑 #${this.instanceId}`; }
+  constructor(leaf: WorkspaceLeaf, private plugin: CobrainPlugin, private viewType = VIEW_TYPE_COBRAIN_CHAT) { super(leaf); }
+  get sessionId(): string | null { return this.session?.id ?? null; }
+  getViewType(): string { return this.viewType; }
+  getDisplayText(): string { return this.session?.title ?? "副脑"; }
   getIcon(): string { return "brain"; }
-
+  getState(): Record<string, unknown> { return { sessionId: this.sessionId }; }
+  async setState(state: unknown, result: ViewStateResult): Promise<void> {
+    const id = state && typeof state === "object" && "sessionId" in state ? (state as { sessionId: unknown }).sessionId : null;
+    const session = typeof id === "string" && this.plugin.sessions.has(id)
+      ? await this.plugin.sessions.get(id) : await this.plugin.initialSession(this.viewType);
+    await this.openSession(session);
+    await super.setState(state, result);
+  }
   async onOpen(): Promise<void> {
+    this.closed = false;
     const root = this.contentEl;
-    root.empty();
-    root.addClass("cobrain-root");
-
-    this.messagesEl = root.createDiv({ cls: "cobrain-messages" });
-    this.renderWelcome();
-
-    const draft = this.plugin.getChatDraft(this.instanceId);
-    if (draft) {
-      this.history = [...draft.history];
-      this.sources = new Set(draft.sources);
-      this.lastMermaid = draft.lastMermaid;
-      this.lastImageEmbed = draft.lastImageEmbed;
-      this.lastSavedNote = draft.lastSavedNote;
-      this.contextSummary = draft.contextSummary;
-      this.addRestoredLine();
-      for (const msg of this.history) {
-        if (msg.role === "user" || msg.role === "assistant") this.addBubble(msg.role, msg.content);
-      }
-      if (this.lastSavedNote) this.addSavedNoteLine(this.lastSavedNote.path);
+    root.empty(); root.addClass("cobrain-root");
+    const header = root.createDiv({ cls: "cobrain-header" });
+    this.titleEl = header.createDiv({ cls: "cobrain-title", text: "副脑" });
+    const history = this.iconButton(header, "history", "历史会话");
+    history.onclick = () => new SessionPicker(this.app, this.plugin, id => this.ui(() => this.plugin.openSession(id, this))).open();
+    const fresh = this.iconButton(header, "plus", "新建对话");
+    fresh.onclick = () => this.ui(() => this.plugin.startConversation(this));
+    const more = this.iconButton(header, "more-horizontal", "更多操作");
+    more.onclick = event => this.showMenu(event);
+    const scope = root.createDiv({ cls: "cobrain-scope" });
+    this.materialBtn = scope.createEl("button", { cls: "cobrain-scope-button", text: "选择讨论文档" });
+    this.materialBtn.onclick = () => this.editMaterials();
+    const area = root.createDiv({ cls: "cobrain-reading-area" });
+    this.messagesEl = area.createDiv({ cls: "cobrain-messages", attr: { role: "log", "aria-label": "对话记录" } });
+    this.messagesEl.onscroll = () => {
+      this.following = nearBottom(this.messagesEl);
+      this.bottomBtn.hidden = this.following;
+    };
+    this.bottomBtn = area.createEl("button", { text: "回到最新", cls: "cobrain-jump-bottom" });
+    this.bottomBtn.hidden = true;
+    this.bottomBtn.onclick = () => this.scrollToBottom();
+    if (typeof ResizeObserver !== "undefined") {
+      const observer = new ResizeObserver(() => { if (this.following && !this.closed) this.scrollToBottom(); });
+      observer.observe(this.messagesEl);
+      this.register(() => observer.disconnect());
     }
-
-    // 截断/摘要提示放输入区上方而非消息流顶部：长对话时消息流顶部永远滚出视野，提示形同虚设
-    this.contextLimitEl = root.createDiv({ cls: "cobrain-context-limit" });
-
-    // 底部：对话产物四件套 + 清空（放回底部按钮栏）。新会话不在这里——它在输入行的「＋」，
-    // 这样只多一个「清空」，仍比早先「新会话+清空」两个都塞底部省一格正文。
-    const bar = root.createDiv({ cls: "cobrain-bar" });
-    this.makeBtn(bar, "概念图", () => void this.doConceptMap());
-    this.makeBtn(bar, "推敲", () => void this.doCritique());
-    this.makeBtn(bar, "配图", () => void this.doImage());
-    this.saveNoteBtn = this.makeBtn(bar, "存为笔记", () => void this.doSaveNote());
-    this.makeBtn(bar, "清空", () => void this.doClearDraft());
-
-    const iw = root.createDiv({ cls: "cobrain-inputrow" });
-    this.inputEl = iw.createEl("textarea", {
-      cls: "cobrain-input",
-      attr: { rows: "1", placeholder: "问副脑…（Enter 发送，Shift+Enter 换行）" },
-    });
-    // 新会话入口放输入行、不放底部按钮栏：安卓端底部一排按钮会 wrap 换行、吃掉对话正文，
-    // 而输入行本就常驻，加个「＋」图标不额外占正文的垂直空间，且和发送键同排、始终显眼。
-    const newSessionBtn = iw.createEl("button", { cls: "cobrain-new-session", text: "＋" });
-    newSessionBtn.setAttribute("aria-label", "新会话");
-    newSessionBtn.setAttribute("title", "新开一个独立的副脑对话面板（最多 3 个）");
-    newSessionBtn.onclick = () => void this.plugin.openNewChatView();
-    this.sendBtn = iw.createEl("button", { text: "发送" });
-    this.sendBtn.onclick = () => void this.send();
-    this.inputEl.addEventListener("input", () => this.autoGrow());
-    this.inputEl.addEventListener("keydown", e => {
-      if (e.key === "Enter" && !e.shiftKey) {
-        e.preventDefault();
-        void this.send();
-      }
-    });
-    this.autoGrow();
-    this.updateContextLimitNotice();
-    this.updateActionButtons();
-  }
-
-  // 输入框随内容长高；上限与滚动由 CSS（.cobrain-input 的 max-height/overflow）封顶。
-  private autoGrow(): void {
-    this.inputEl.setCssStyles({ height: "auto" });
-    this.inputEl.setCssStyles({ height: this.inputEl.scrollHeight + "px" });
-  }
-
-  private makeBtn(parent: HTMLElement, text: string, fn: () => void): HTMLButtonElement {
-    const b = parent.createEl("button", { text });
-    b.onclick = fn;
-    this.actionButtons.push(b);
-    return b;
-  }
-
-  private renderWelcome(): void {
-    this.welcomeEl = this.messagesEl.createDiv({ cls: "cobrain-welcome" });
-    this.paintWelcome();
-    void this.plugin.whenIndexReady().then(
-      () => this.paintWelcome(),
-      () => undefined,
-    );
-  }
-
-  // welcome 可重绘（索引加载完成后状态会变）：文案 + 空状态行动按钮——指路不如直达。
-  private paintWelcome(): void {
-    const el = this.welcomeEl;
-    el.empty();
-    el.createDiv({ text: this.plugin.chatWelcomeText() });
-    const actions = this.plugin.welcomeActions();
-    if (!actions.openSettings && !actions.rebuildIndex) return;
-    const row = el.createDiv({ cls: "cobrain-welcome-actions" });
-    if (actions.openSettings) {
-      row.createEl("button", { text: "打开设置" }).onclick = () => this.plugin.openPluginSettings();
-    }
-    if (actions.rebuildIndex) {
-      const btn = row.createEl("button", { text: "重建索引" });
-      btn.onclick = () => {
-        btn.disabled = true; // 重建在后台跑（进度见 Notice），防重复点击
-        void this.plugin.rebuildIndex();
-      };
-    }
-  }
-
-  // 「已恢复草稿」提示行 + 就近的「清空重来」入口：恢复是默认路径（打开面板零打断）。
-  // 措辞是「清空重来」而非「新建对话」——它清的是当前面板的草稿，不是开新面板（那走按钮栏「新会话」），
-  // 避免用户把它误当多开入口。走清空确认，防误删草稿。
-  private addRestoredLine(): void {
-    const line = this.messagesEl.createDiv({ cls: "cobrain-restored" });
-    line.createSpan({ text: "已恢复上次未关闭的对话草稿。" });
-    const fresh = line.createEl("a", { text: "清空重来", cls: "cobrain-inline-action" });
-    fresh.onclick = () => void this.doClearDraft();
-  }
-
-  // 保存闭环：消息流里留一行可点开的「已保存」，别让产品的奖励时刻消失在几秒的 Notice 里。
-  private addSavedNoteLine(path: string): void {
-    const line = this.messagesEl.createDiv({ cls: "cobrain-saved-line" });
-    line.createSpan({ text: "已保存笔记：" });
-    const name = (path.split("/").pop() ?? path).replace(/\.md$/, "");
-    line.createEl("a", { text: name }).onclick = () => void this.app.workspace.openLinkText(path, "", false);
-    this.messagesEl.scrollTop = this.messagesEl.scrollHeight;
-  }
-
-  // 带可点链接的保存 Notice（Notice 接受 DocumentFragment）。
-  private savedNotice(prefix: string, path: string): void {
-    const frag = document.createDocumentFragment();
-    frag.appendChild(document.createTextNode(prefix));
-    const a = document.createElement("a");
-    a.textContent = (path.split("/").pop() ?? path).replace(/\.md$/, "");
-    a.addEventListener("click", () => void this.app.workspace.openLinkText(path, "", false));
-    frag.appendChild(a);
-    new Notice(frag, 8000);
-  }
-
-  private persistDraft(): void {
-    this.plugin.saveChatDraft(this.instanceId, {
-      history: this.history,
-      sources: [...this.sources],
-      lastMermaid: this.lastMermaid,
-      lastImageEmbed: this.lastImageEmbed,
-      lastSavedNote: this.lastSavedNote,
-      contextSummary: this.contextSummary,
-    });
-  }
-
-  private updateActionButtons(): void {
-    const hasHistory = this.history.length > 0;
-    for (const b of this.actionButtons) b.disabled = this.busy || !hasHistory;
-    if (this.saveNoteBtn) {
-      this.saveNoteBtn.disabled = this.busy || !hasHistory;
-      this.saveNoteBtn.setText("存为笔记");
-    }
-  }
-
-  private updateContextLimitNotice(): void {
-    if (!this.contextLimitEl) return;
-    const text = chatContextLimitText(this.history.length, this.contextSummary?.coveredCount ?? 0);
-    if (text) {
-      this.contextLimitEl.setText(text);
-      this.contextLimitEl.style.display = "";
-    } else {
-      this.contextLimitEl.setText("");
-      this.contextLimitEl.style.display = "none";
-    }
-  }
-
-  private appendHistory(...msgs: ChatMsg[]): void {
-    this.history.push(...msgs);
-    this.updateContextLimitNotice();
-    this.updateActionButtons();
-    this.persistDraft();
-  }
-
-  private resetConversationUi(): void {
-    this.messagesEl.empty();
-    this.renderWelcome();
-    this.updateContextLimitNotice();
-    this.updateActionButtons();
-  }
-
-  private stateSignature(
-    history: ChatMsg[] = this.history,
-    sources: string[] = [...this.sources],
-    mermaid: string | null = this.lastMermaid,
-    imageEmbed: string | null = this.lastImageEmbed,
-  ): string {
-    return chatStateSignature(history, sources, mermaid, imageEmbed);
-  }
-
-  // 滑出 limit 条窗口时把滚动摘要作为背景材料带上；窗口装得下就不带（全部原文在场，摘要是冗余）。
-  // effectiveLength：performAsk 在 user 消息入历史后调用，需要按「不含末尾这条」的长度判断。
-  private earlierSummaryFor(limit: number, effectiveLength = this.history.length): string | undefined {
-    if (!this.contextSummary?.text) return undefined;
-    return effectiveLength > limit ? this.contextSummary.text : undefined;
-  }
-
-  // 后台维护滚动摘要：把滑出 20 条窗口、尚未纳入摘要的旧消息并入既有摘要。
-  // fire-and-forget：失败只记日志、下轮对话自动重试；generation 计数使清空/关闭后的迟到结果作废。
-  private maybeUpdateSummary(): void {
-    const plan = summaryUpdatePlan(this.history.length, this.contextSummary?.coveredCount ?? 0);
-    if (!plan || this.summaryInFlight) return;
-    if (this.plugin.chatConfigProblem()) return;
-    const gen = this.summaryGen;
-    const dropped = this.history.slice(plan.from, plan.to);
-    const prev = this.contextSummary?.text ?? "";
-    this.summaryInFlight = true;
-    this.plugin.tutor.updateRollingSummary(prev, dropped)
-      .then(text => {
-        if (gen !== this.summaryGen || !text) return;
-        this.contextSummary = { text, coveredCount: plan.to };
-        this.updateContextLimitNotice();
-        this.persistDraft();
-      })
-      .catch(e => console.warn("Cobrain: 滚动摘要更新失败（下轮自动重试）", e))
-      .finally(() => { this.summaryInFlight = false; });
-  }
-
-  private addBubble(role: "user" | "assistant", text: string, sources?: string[]): HTMLElement {
-    const b = this.messagesEl.createDiv({ cls: `cobrain-bubble cobrain-bubble-${role === "user" ? "user" : "ai"}` });
-    const who = b.createDiv({ cls: "cobrain-who" });
-    who.createSpan({ text: role === "user" ? "你" : "副脑" });
-    if (role === "assistant") this.addCopyControl(who, () => text);
-    const body = b.createDiv();
-
-    if (role === "assistant") {
-      void this.renderAssistant(body, text);
-    } else {
-      body.setText(text);
-    }
-
-    if (sources?.length) {
-      b.createDiv({ cls: "cobrain-srcline", text: "来源：" + sources.map(p => p.split("/").pop()).join("、") });
-    }
-    this.messagesEl.scrollTop = this.messagesEl.scrollHeight;
-    return b;
-  }
-
-  // AI 气泡「复制」：面板文字虽已放开选中，但移动端长按选择很痛苦，明确的复制入口是地板配置。
-  private addCopyControl(whoEl: HTMLElement, getText: () => string): void {
-    const btn = whoEl.createEl("a", { text: "复制", cls: "cobrain-copy" });
-    btn.onclick = async e => {
-      e.stopPropagation();
-      try {
-        await navigator.clipboard.writeText(getText());
-        new Notice("已复制");
-      } catch {
-        new Notice("复制失败");
+    this.statusEl = root.createDiv({ cls: "cobrain-status", attr: { "aria-live": "polite" } });
+    this.statusEl.hidden = true;
+    const composer = root.createDiv({ cls: "cobrain-composer" });
+    this.inputEl = composer.createEl("textarea", { cls: "cobrain-input", attr: {
+      rows: "1", placeholder: "围绕这些材料继续聊…", "aria-label": "发给副脑的消息", name: "cobrain-message", autocomplete: "off",
+    } });
+    this.sendBtn = composer.createEl("button", { text: "发送", cls: "cobrain-send mod-cta" });
+    this.sendBtn.onclick = () => this.busy ? this.stop() : this.ui(() => this.send());
+    this.inputEl.oninput = () => {
+      this.autoGrow();
+      if (this.session) { this.session.composer = this.inputEl.value; this.ui(() => this.plugin.persistSession(this.session!, false)); }
+    };
+    this.inputEl.addEventListener("compositionstart", () => { this.composing = true; });
+    this.inputEl.addEventListener("compositionend", () => { this.composing = false; });
+    this.inputEl.onkeydown = event => {
+      if (shouldSendOnEnter(event, Platform.isMobile, this.composing)) {
+        event.preventDefault(); if (!this.busy) this.ui(() => this.send());
       }
     };
   }
-
-  // 流式回答气泡：创建即显示「label + 秒数」计时；首个增量到达后切换为逐字纯文本；
-  // finish() 用完整文本做一次 Markdown 渲染（流式期间渲染半截 Markdown 会闪烁/错排，纯文本最稳）。
-  private streamingBubble(label: string): StreamBubble {
-    const el = this.messagesEl.createDiv({ cls: "cobrain-bubble cobrain-bubble-ai" });
-    let acc = "";
-    let fullText = "";
-    const who = el.createDiv({ cls: "cobrain-who" });
-    who.createSpan({ text: "副脑" });
-    // 流式中点复制拿到已流出的部分，完成后拿全文
-    this.addCopyControl(who, () => fullText || acc);
-    const body = el.createDiv();
-    const labelSpan = body.createSpan({ text: label });
-    const secSpan = body.createSpan({ text: " 0s", cls: "cobrain-timer" });
-    secSpan.setCssStyles({ opacity: "0.6", fontSize: "0.9em" });
-    const start = Date.now();
-    let timer: number | null = window.setInterval(() => {
-      secSpan.setText(" " + Math.floor((Date.now() - start) / 1000) + "s");
-    }, 1000);
-    const stopTimer = () => {
-      if (timer !== null) { window.clearInterval(timer); timer = null; }
-    };
-    this.messagesEl.scrollTop = this.messagesEl.scrollHeight;
-
-    let streamEl: HTMLElement | null = null;
-    return {
-      el,
-      append: (text: string) => {
-        if (!streamEl) {
-          stopTimer();
-          labelSpan.remove();
-          secSpan.remove();
-          streamEl = body.createDiv({ cls: "cobrain-stream" });
-        }
-        acc += text;
-        // 逐字更新期间只在用户本来就贴着底部时才跟随滚动，别抢用户往回翻的滚动条
-        const nearBottom = this.messagesEl.scrollHeight - this.messagesEl.scrollTop - this.messagesEl.clientHeight < 60;
-        streamEl.setText(acc);
-        if (nearBottom) this.messagesEl.scrollTop = this.messagesEl.scrollHeight;
-      },
-      finish: async (text: string) => {
-        fullText = text;
-        stopTimer();
-        body.empty();
-        await this.renderAssistant(body, text);
-        this.messagesEl.scrollTop = this.messagesEl.scrollHeight;
-      },
-      remove: () => { stopTimer(); el.remove(); },
-    };
+  private iconButton(parent: HTMLElement, icon: string, label: string): HTMLButtonElement {
+    const button = parent.createEl("button", { cls: "cobrain-icon-button" });
+    button.setAttribute("aria-label", label); button.title = label; setIcon(button, icon);
+    if (!button.querySelector("svg") && !button.textContent) button.textContent = icon === "plus" ? "+" : icon === "history" ? "历史" : "⋯";
+    return button;
   }
-
-  // 渲染助手消息：先 await Markdown 渲染，再挂 Mermaid 切换 / 配图交互。
-  private async renderAssistant(body: HTMLElement, text: string): Promise<void> {
-    await MarkdownRenderer.render(this.app, text, body, "", this);
-    const mermaidMatch = text.match(/```mermaid\n([\s\S]*?)```/);
-    if (mermaidMatch) await this.enhanceMermaid(body, mermaidMatch[1].trim());
-    const imageMatch = text.match(/!\[\[([^\]]+)\]\]/);
-    if (imageMatch) await this.enhanceImage(body, imageMatch[1]);
+  private ui(action: () => Promise<unknown>): void { void action().catch(e => this.plugin.reportError(e)); }
+  async openSession(session: ChatSession): Promise<void> {
+    if (this.session?.id === session.id || this.closed) return;
+    const ticket = ++this.switchTicket;
+    this.stop();
+    if (this.currentTask) await this.currentTask;
+    if (this.session) await this.plugin.persistSession(this.session);
+    if (ticket !== this.switchTicket || this.closed) return;
+    this.generation++;
+    this.session = session;
+    this.inputEl.value = session.composer;
+    this.setStatus(""); this.autoGrow(); this.refreshSessionHeader();
+    await this.renderHistory();
+    if (ticket !== this.switchTicket || this.closed) return;
+    await this.plugin.rememberSession(session.id);
+    this.app.workspace.requestSaveLayout();
+    this.scrollToBottom();
   }
-
-  // 等 root 内出现匹配 selector 的元素（应对 Obsidian/Mermaid 的异步渲染），最多等 timeoutMs。
-  private waitForElement(root: HTMLElement, selector: string, timeoutMs = 2000): Promise<HTMLElement | null> {
-    const found = (): HTMLElement | null => {
-      const el = root.querySelector(selector);
-      return el instanceof HTMLElement ? el : null;
-    };
-    const existing = found();
-    if (existing) return Promise.resolve(existing);
-    return new Promise(resolve => {
-      let done = false;
-      const finish = (el: HTMLElement | null) => {
-        if (done) return;
-        done = true;
-        obs.disconnect();
-        window.clearTimeout(timer);
-        resolve(el);
-      };
-      const obs = new MutationObserver(() => {
-        const el = found();
-        if (el) finish(el);
-      });
-      obs.observe(root, { childList: true, subtree: true });
-      const timer = window.setTimeout(() => finish(found()), timeoutMs);
-    });
+  refreshSessionHeader(): void {
+    if (!this.session || !this.titleEl) return;
+    this.titleEl.setText(this.session.title); this.titleEl.title = this.session.title;
+    const materials = this.session.materials;
+    const first = materials[0];
+    const name = first?.path.split("/").pop()?.replace(/\.md$/i, "");
+    const label = !first ? "未附加文档 · 仅聊天内容"
+      : `${first.kind === "selection" ? "选文" : "文档"} · ${name}${materials.length > 1 ? ` 等 ${materials.length} 项` : ""}`;
+    this.materialBtn.setText(label);
+    this.materialBtn.title = `${materials.map(m => m.path).join("\n") || "添加文档，无需索引"}\n点击管理本会话范围`;
+    this.materialBtn.setAttribute("aria-label", `管理讨论范围，${label}`);
   }
-
-  // 点击 Mermaid 图 ↔ 查看其源码。
-  private async enhanceMermaid(body: HTMLElement, code: string): Promise<void> {
-    const container = await this.waitForElement(body, "pre.language-mermaid, .block-language-mermaid, [class*='mermaid']");
-    if (!container) return;
-    let showingCode = false;
-    const rendered = container.cloneNode(true) as HTMLElement; // 保存渲染视图
-    container.addClass("cobrain-mermaid-toggle");
-    container.setAttribute("title", "点击查看代码");
-    container.onclick = (e: MouseEvent) => {
-      e.stopPropagation();
-      if (showingCode) {
-        container.empty();
-        container.appendChild(rendered.cloneNode(true));
-        container.setAttribute("title", "点击查看代码");
-        showingCode = false;
-      } else {
-        container.empty();
-        const pre = container.createEl("pre", { cls: "cobrain-mermaid-code" });
-        pre.createEl("code", { text: code });
-        container.setAttribute("title", "点击返回图表");
-        showingCode = true;
-      }
-    };
+  private editMaterials(): void {
+    if (!this.session || this.busy || this.sending) return;
+    new MaterialModal(this.app, this.plugin, this.session, () => {
+      this.refreshSessionHeader(); this.ui(() => this.plugin.persistSession(this.session!));
+    }).open();
   }
-
-  // 配图缩略图 + 单击查看大图 + 右键菜单（另存 / 删除）。
-  private async enhanceImage(body: HTMLElement, imagePath: string): Promise<void> {
-    const base = imagePath.split("/").pop() ?? imagePath;
-    // 等任意 img 渲染出来，再按 src 里的文件名匹配目标图（避免拼 CSS 选择器的转义问题）
-    await this.waitForElement(body, "img");
-    const imgEl = Array.from(body.querySelectorAll("img")).find(im => {
-      const src = im.getAttribute("src") || "";
-      try { return decodeURIComponent(src).includes(base); } catch { return src.includes(base); }
-    });
-    if (!(imgEl instanceof HTMLImageElement)) return;
-
-    imgEl.addClass("cobrain-image-thumb");
-    imgEl.setAttribute("title", "单击查看大图");
-    imgEl.onclick = (e: MouseEvent) => {
-      e.stopPropagation();
-      const file = this.app.vault.getAbstractFileByPath(imagePath);
-      if (file instanceof TFile) this.app.workspace.getLeaf(false).openFile(file);
-    };
-    imgEl.addEventListener("contextmenu", (e: MouseEvent) => {
-      e.preventDefault();
-      e.stopPropagation();
-      const menu = new Menu();
-      menu.addItem(item =>
-        item.setTitle("单独保存配图").setIcon("download").onClick(async () => {
-          const file = this.app.vault.getAbstractFileByPath(imagePath);
-          if (!(file instanceof TFile)) return;
-          try {
-            const content = await this.app.vault.readBinary(file);
-            const newPath = await saveImage(this.app, this.plugin.settings, content);
-            new Notice(`配图已另存为：${newPath}`);
-          } catch (err) {
-            new Notice("保存失败：" + errMsg(err));
-          }
-        }),
-      );
-      menu.addItem(item =>
-        item.setTitle("删除配图").setIcon("trash").onClick(async () => {
-          const file = this.app.vault.getAbstractFileByPath(imagePath);
-          if (!(file instanceof TFile)) return;
-          const folder = this.plugin.settings.attachmentFolder || "cobrain-note/附件";
-          if (!isUnderFolder(file.path, folder)) {
-            new Notice("只能删除附件目录内的 Cobrain 配图");
-            return;
-          }
-          const confirmed = await askConfirm(this.app, "删除配图", `确定删除 ${file.path}？`, "删除");
-          if (!confirmed) return;
-          try {
-            await this.app.vault.delete(file);
-            new Notice("配图已删除");
-            imgEl.remove();
-          } catch (err) {
-            new Notice("删除失败：" + errMsg(err));
-          }
-        }),
-      );
-      menu.showAtMouseEvent(e);
-    });
-  }
-
-  // 把检索命中的旧笔记显式列出来、可点开，让第二大脑的联想发生在用户眼前。
-  // before 提供时插到该元素前面：流式场景下气泡先创建、检索结果后到，仍保持「相关笔记在上、回答在下」。
-  // 新一轮出现时折叠此前所有相关块（头部可点击展开）：每块占侧栏半屏，长对话里会淹没对话本身。
-  private addRelatedBlock(hits: QueryHit[], before?: HTMLElement): void {
-    if (!hits.length) return;
-    this.messagesEl.querySelectorAll(".cobrain-related").forEach(el => el.classList.add("is-collapsed"));
-    const seen = new Set<string>();
-    const uniq = hits.filter(h => {
-      if (seen.has(h.path)) return false;
-      seen.add(h.path);
-      return true;
-    });
-    const wrap = this.messagesEl.createDiv({ cls: "cobrain-related" });
-    if (before) this.messagesEl.insertBefore(wrap, before);
-    const shown = uniq.slice(0, 8);
-    const head = wrap.createDiv({ cls: "cobrain-related-head", text: `相关旧笔记 · ${shown.length} 篇` });
-    head.setAttribute("title", "点击折叠 / 展开");
-    head.onclick = () => wrap.classList.toggle("is-collapsed");
-    shown.forEach(h => {
-      const item = wrap.createDiv({ cls: "cobrain-related-item" });
-      const title = (h.path.split("/").pop() ?? h.path).replace(/\.md$/, "") + (h.heading ? " › " + h.heading : "");
-      item.createDiv({ cls: "cobrain-related-title", text: title });
-      item.createDiv({ cls: "cobrain-related-snippet", text: h.text.slice(0, 80) + (h.text.length > 80 ? "…" : "") });
-      item.onclick = () => this.app.workspace.openLinkText(h.path, "", false);
-    });
-    this.messagesEl.scrollTop = this.messagesEl.scrollHeight;
-  }
-
-  // 检索空命中不再静默：让用户能区分「vault 里真没有相关」和「没配置 / 阈值卡掉了」。
-  private addNoHitLine(before?: HTMLElement): void {
-    const line = this.messagesEl.createDiv({ cls: "cobrain-nohit", text: "本轮未命中相关旧笔记" });
-    if (before) this.messagesEl.insertBefore(line, before);
-  }
-
-  private currentTopic(): string {
-    for (let i = this.history.length - 1; i >= 0; i--) {
-      if (this.history[i].role === "user") return this.history[i].content;
-    }
-    return "";
-  }
-
-  // 占用面板：busy 期间禁用输入，发送键变「停止」，三个按钮互斥避免并发交错。
-  // 每次占用配一个新 AbortController：走 fetch 的请求可被「停止」真正中止。
-  private acquire(): boolean {
-    if (this.busy) { new Notice("正在处理上一个请求，请稍候…"); return false; }
-    this.busy = true;
-    this.currentAbort = new AbortController();
-    this.inputEl.disabled = true;
-    this.sendBtn.disabled = false;
-    this.sendBtn.setText("停止");
-    this.sendBtn.onclick = () => this.cancelCurrent();
-    this.updateActionButtons();
-    return true;
-  }
-  private release(): void {
-    this.busy = false;
-    this.currentCancel = null;
-    this.currentAbort = null;
-    this.inputEl.disabled = false;
-    this.sendBtn.disabled = false;
-    this.sendBtn.setText("发送");
-    this.sendBtn.onclick = () => void this.send();
-    this.updateActionButtons();
-  }
-
-  private currentSignal(): AbortSignal | undefined {
-    return this.currentAbort?.signal;
-  }
-
-  // 点「停止」：中止底层 fetch（流式路径请求真正停掉），并拒绝在途等待、立即解锁 UI。
-  // requestUrl 兜底路径无法中止：那种情况下停止只是放弃结果，请求仍会在后台跑完。
-  private cancelCurrent(): void {
-    if (!this.currentCancel && !this.currentAbort) return;
-    this.currentAbort?.abort();
-    this.currentCancel?.();
-    new Notice("已停止");
-  }
-
-  // 把一次网络等待包成可取消（makeCancellable 的竞速）：点「停止」即 reject，UI 立即解锁。
-  private runCancellable<T>(p: Promise<T>): Promise<T> {
-    const { result, cancel } = makeCancellable(p);
-    this.currentCancel = cancel;
-    return result.finally(() => { this.currentCancel = null; });
-  }
-
-  // 把"引用"(来源链接 + 原文)预填进输入框；来源上下文暂存，喂给紧接着的那一问。
-  quoteIntoInput(text: string, sourceContext?: string): void {
-    if (sourceContext) this.pendingSourceContexts.push(sourceContext);
+  quoteIntoInput(text: string, reference: MaterialReference): void {
+    if (!this.session) return;
+    // 明确选文后以选区替换同篇全文引用，避免用户只想讨论一句话却把整篇当默认材料。
+    this.session.materials = this.session.materials.filter(m => !(m.path === reference.path && m.kind === "document"));
+    this.session.materials.push(reference);
     this.inputEl.value = text + this.inputEl.value;
-    this.inputEl.focus();
+    this.session.composer = this.inputEl.value;
+    this.refreshSessionHeader(); this.autoGrow(); this.inputEl.focus();
     this.inputEl.setSelectionRange(text.length, text.length);
-    this.autoGrow();
-    this.inputEl.scrollTop = 0; // 引用在顶部，确保可见
+    this.ui(() => this.plugin.persistSession(this.session!));
   }
-
+  private showMenu(event: MouseEvent): void {
+    const session = this.session;
+    if (!session) return;
+    const menu = new Menu();
+    const add = (title: string, icon: string, action: () => Promise<unknown>, disabled = false) => {
+      menu.addItem(item => item.setTitle(title).setIcon(icon).setDisabled(disabled).onClick(() => this.ui(action)));
+    };
+    add("整理为笔记", "file-plus", () => this.saveAsNote(), this.busy || !session.history.length);
+    add("导出完整会话", "download", () => this.exportConversation(), !session.history.length);
+    menu.addSeparator();
+    menu.addItem(item => item.setTitle("手动查找其它资料").setIcon("search").setDisabled(this.busy).onClick(() => {
+      new RetrievalModal(this.app, this.plugin, references => {
+        for (const ref of references) if (!session.materials.some(m => m.id === ref.id)) session.materials.push(ref);
+        this.refreshSessionHeader(); this.ui(() => this.plugin.persistSession(session));
+      }).open();
+    }));
+    add("推敲观点", "scan-search", () => this.startResponse("critique"), this.busy || !session.history.length);
+    add("生成概念图", "network", () => this.startResponse("concept"), this.busy || !session.history.length);
+    menu.addSeparator();
+    add("重命名会话", "pencil", async () => {
+      const title = await askPrompt(this.app, "会话名称", session.title);
+      if (title) { session.title = title; this.refreshSessionHeader(); await this.plugin.persistSession(session); }
+    });
+    if (!Platform.isMobile) add("新开对话面板", "panel-right-open", () => this.plugin.openNewChatView());
+    menu.addItem(item => item.setTitle("设置").setIcon("settings").onClick(() => this.plugin.openPluginSettings()));
+    menu.addSeparator();
+    add("删除当前会话", "trash", async () => {
+      if (!await askConfirm(this.app, "删除这段会话", "会删除这段会话的完整记录，已导出的笔记会保留。", "删除会话")) return;
+      this.stop(); if (this.currentTask) await this.currentTask;
+      await this.plugin.deleteSession(session.id);
+    });
+    menu.showAtMouseEvent(event);
+  }
+  private autoGrow(): void {
+    this.inputEl.style.height = "auto";
+    this.inputEl.style.height = `${this.inputEl.scrollHeight + 2}px`;
+  }
+  private setStatus(text: string): void {
+    if (this.closed) return;
+    this.statusEl.setText(text); this.statusEl.title = text; this.statusEl.hidden = !text;
+  }
+  private setBusy(busy: boolean): void {
+    this.busy = busy;
+    if (this.closed) return;
+    this.sendBtn.setText(busy ? "停止" : "发送");
+    this.sendBtn.setAttribute("aria-label", busy ? "停止当前回答" : "发送消息");
+    this.materialBtn.disabled = busy;
+    // 保留输入能力，手机键盘不会因禁用输入框反复收起，也可以在等待时起草下一问。
+  }
+  private scrollToBottom(): void {
+    this.following = true;
+    this.messagesEl.scrollTop = this.messagesEl.scrollHeight;
+    this.bottomBtn.hidden = true;
+  }
+  private clearMessages(): void {
+    for (const component of this.renderers.values()) this.removeChild(component);
+    this.renderers.clear(); this.messagesEl.empty();
+  }
+  private async renderAssistant(body: HTMLElement, text: string): Promise<void> {
+    const previous = this.renderers.get(body);
+    if (previous) this.removeChild(previous);
+    const component = new Component(); this.addChild(component); this.renderers.set(body, component);
+    body.empty(); await MarkdownRenderer.render(this.app, text, body, "", component);
+  }
+  private async bubble(role: "user" | "assistant", text: string, index?: number): Promise<HTMLElement> {
+    const el = this.messagesEl.createDiv({ cls: `cobrain-bubble cobrain-bubble-${role}` });
+    if (index !== undefined) el.dataset.historyIndex = String(index);
+    const who = el.createDiv({ cls: "cobrain-who" });
+    who.createSpan({ text: role === "user" ? "我" : "副脑" });
+    const copy = who.createEl("button", { cls: "cobrain-copy", text: "复制" });
+    copy.setAttribute("aria-label", `复制这条${role === "user" ? "提问" : "回答"}`);
+    copy.onclick = () => this.ui(async () => { await navigator.clipboard.writeText(text); new Notice("已复制"); });
+    const body = el.createDiv({ cls: "cobrain-body" });
+    if (role === "assistant") await this.renderAssistant(body, text); else body.setText(text);
+    return el;
+  }
+  private async renderHistory(): Promise<void> {
+    if (!this.session) return;
+    const gen = this.generation;
+    this.clearMessages();
+    this.olderBtn = this.messagesEl.createEl("button", { cls: "cobrain-load-older" });
+    this.renderedFrom = Math.max(0, this.session.history.length - 60);
+    this.updateOlderButton();
+    this.olderBtn.onclick = () => this.ui(() => this.loadOlder());
+    if (!this.session.history.length) {
+      const empty = this.messagesEl.createDiv({ cls: "cobrain-empty" });
+      empty.createDiv({ text: "从正在读的这一篇开始", cls: "cobrain-empty-title" });
+      empty.createEl("p", { text: this.session.materials.length ? "文档已附加。可以解释一个概念，追问一段论证，或沿着一个问题往下想。" : "添加一篇文档，或直接开始对话。" });
+      if (this.plugin.chatConfigProblem()) empty.createEl("button", { text: "配置文本模型" }).onclick = () => this.plugin.openPluginSettings();
+    }
+    for (let i = this.renderedFrom; i < this.session.history.length; i++) {
+      if (gen !== this.generation || this.closed) return;
+      const message = this.session.history[i];
+      await this.bubble(message.role as "user" | "assistant", message.content, i);
+    }
+    if (this.session.history[this.session.history.length - 1]?.role === "user") this.retryLine("上次提问尚未完成，可以继续回答。");
+  }
+  private updateOlderButton(): void {
+    this.olderBtn.hidden = this.renderedFrom === 0;
+    this.olderBtn.setText(`显示更早的记录（还有 ${this.renderedFrom} 条）`);
+  }
+  private async loadOlder(): Promise<void> {
+    if (!this.session || !this.renderedFrom) return;
+    this.olderBtn.disabled = true;
+    const gen = this.generation, before = this.messagesEl.scrollHeight, top = this.messagesEl.scrollTop;
+    const from = Math.max(0, this.renderedFrom - 40);
+    const anchor = this.olderBtn.nextSibling;
+    for (let i = from; i < this.renderedFrom; i++) {
+      const message = this.session.history[i];
+      const el = await this.bubble(message.role as "user" | "assistant", message.content, i);
+      if (gen !== this.generation) return;
+      this.messagesEl.insertBefore(el, anchor);
+    }
+    this.renderedFrom = from; this.updateOlderButton(); this.olderBtn.disabled = false;
+    this.messagesEl.scrollTop = top + this.messagesEl.scrollHeight - before;
+  }
+  private trimRendered(): void {
+    const elements = this.messagesEl.querySelectorAll<HTMLElement>("[data-history-index]");
+    if (elements.length <= 100 || !this.following) return;
+    for (const el of Array.from(elements).slice(0, elements.length - 60)) {
+      const body = el.querySelector<HTMLElement>(".cobrain-body");
+      const renderer = body ? this.renderers.get(body) : null;
+      if (renderer) { this.removeChild(renderer); this.renderers.delete(body!); }
+      this.renderedFrom = Math.max(this.renderedFrom, Number(el.dataset.historyIndex) + 1); el.remove();
+    }
+    this.updateOlderButton();
+  }
   private async send(): Promise<void> {
+    if (!this.session || this.busy || this.sending) return;
     const text = this.inputEl.value.trim();
     if (!text) return;
-    const configProblem = this.plugin.chatConfigProblem();
-    if (configProblem) {
-      new Notice(configProblem);
-      return;
-    }
-    if (!this.acquire()) return; // 占住面板；busy 时输入原样留在框里，不被吞
-    const sourceContext = this.pendingSourceContexts.length
-      ? this.pendingSourceContexts.join("\n\n---\n\n")
-      : undefined; // 消费一次：仅这一问带来源上下文
-    this.pendingSourceContexts = [];
-    this.inputEl.value = "";
-    this.autoGrow();
-    this.addBubble("user", text);
-    this.appendHistory({ role: "user", content: text });
-    await this.performAsk(text, sourceContext);
-  }
-
-  // 失败后的「重试」入口：history 末尾已有这条 user 消息，不再重复入历史/加气泡。
-  private async retryAsk(text: string, sourceContext?: string): Promise<void> {
-    if (!this.acquire()) return;
-    await this.performAsk(text, sourceContext);
-  }
-
-  // 一轮提问的主体。前提：已 acquire，且 history 末尾就是本条 user 消息（send 与重试共用）。
-  private async performAsk(text: string, sourceContext?: string): Promise<void> {
-    // priorHistory 不含末尾这条正在问的消息（tutor.ask 会单独拼 userMsg）；摘要窗口口径与之对齐
-    const priorHistory = chatHistoryForModel(this.history.slice(0, -1));
-    const earlierSummary = this.earlierSummaryFor(CHAT_CONTEXT_MSG_LIMIT, this.history.length - 1);
-    const bubble = this.streamingBubble("思考中…");
-    let streamed = "";
-    let retrievedSources: string[] = []; // 检索一完成就记下：中途停止但保留部分回答时，来源同样要入账
-    let settled = false; // 取消/完成后到达的迟到增量与检索回调不再上屏
+    const problem = this.plugin.chatConfigProblem();
+    if (problem) { new Notice(problem); return; }
+    const release = this.plugin.acquireSessionRequest(this.session.id);
+    if (!release) { new Notice("这段会话正在另一个面板中回答，请稍后继续。"); return; }
+    this.sending = true;
     try {
-      const { reply, sources } = await this.runCancellable(this.plugin.tutor.ask(priorHistory, text, {
-        sourceContext,
-        earlierSummary,
-        signal: this.currentSignal(),
-        onRetrieved: (related, sources) => {
-          if (settled) return;
-          retrievedSources = sources;
-          if (related.length) this.addRelatedBlock(related, bubble.el);
-          else if (!this.plugin.embedConfigProblem()) this.addNoHitLine(bubble.el);
-        },
-        onDelta: t => {
-          if (settled) return;
-          streamed += t;
-          bubble.append(t);
-        },
-      }));
-      settled = true;
-      await bubble.finish(reply);
-      sources.forEach(s => this.sources.add(s));
-      this.appendHistory({ role: "assistant", content: reply });
-      this.maybeUpdateSummary();
-    } catch (e) {
-      settled = true;
-      if (e instanceof CancelledError) {
-        // 已流出的部分回答保留并入历史：用户看到了它，重开面板不该凭空消失
-        if (streamed.trim()) {
-          await bubble.finish(streamed);
-          retrievedSources.forEach(s => this.sources.add(s));
-          this.appendHistory({ role: "assistant", content: streamed });
-        } else bubble.remove();
-      } else {
-        bubble.remove();
-        this.addErrorBubble(errMsg(e), () => void this.retryAsk(text, sourceContext));
-        this.persistDraft();
-      }
-    } finally {
-      this.release();
-      this.inputEl.focus();
-    }
+      this.messagesEl.querySelectorAll(".cobrain-empty, .cobrain-retry").forEach(el => el.remove());
+      this.session.history.push({ role: "user", content: text });
+      this.session.composer = ""; this.inputEl.value = ""; this.autoGrow();
+      await this.bubble("user", text, this.session.history.length - 1);
+      this.scrollToBottom();
+      await this.startResponse("ask", release);
+    } finally { this.sending = false; release(); }
   }
-
-  // 错误气泡 + 重试：失败不该让用户重新组织上一问。错误本身不入历史（重开面板即消失），重试成功后自然接上。
-  private addErrorBubble(message: string, retry: () => void): void {
-    const b = this.messagesEl.createDiv({ cls: "cobrain-bubble cobrain-bubble-ai" });
-    b.createDiv({ cls: "cobrain-who", text: "副脑" });
-    b.createDiv({ text: "出错了：" + message });
-    const row = b.createDiv({ cls: "cobrain-bubble-actions" });
-    const btn = row.createEl("button", { text: "重试", cls: "cobrain-action-btn" });
-    btn.onclick = () => { b.remove(); retry(); };
-    this.messagesEl.scrollTop = this.messagesEl.scrollHeight;
+  private async startResponse(kind: "ask" | "critique" | "concept", ownedRelease?: () => void): Promise<void> {
+    if (!this.session || this.busy) return;
+    const problem = this.plugin.chatConfigProblem();
+    if (problem) { new Notice(problem); return; }
+    const release = ownedRelease ?? this.plugin.acquireSessionRequest(this.session.id);
+    if (!release) { new Notice("这段会话正在另一个面板中回答，请稍后继续。"); return; }
+    const task = this.respond(kind);
+    this.currentTask = task;
+    try { await task; } finally { release(); if (this.currentTask === task) this.currentTask = null; }
   }
-
-  // 概念图就地迭代控制：方向/详细度是「画完不满意」时的高频调整项，埋在设置页等于每次重画都要跑一趟设置。
-  // 点击即改设置（持久化）并追加重画一张，旧图保留便于对比。
-  private addConceptMapControls(bubbleEl: HTMLElement): void {
-    const s = this.plugin.settings;
-    const row = bubbleEl.createDiv({ cls: "cobrain-bubble-actions" });
-    const redraw = (mutate: () => void) => {
-      mutate();
-      this.plugin.saveSettingsDebounced();
-      void this.doConceptMap();
+  private async respond(kind: "ask" | "critique" | "concept"): Promise<void> {
+    const session = this.session!;
+    const gen = this.generation;
+    const abort = new AbortController(); this.currentAbort = abort; this.setBusy(true);
+    this.messagesEl.querySelectorAll(".cobrain-retry").forEach(el => el.remove());
+    const snapshot = session.history.map(m => ({ ...m }));
+    const references = session.materials.map(m => ({ ...m }));
+    const active = () => !this.closed && gen === this.generation && this.session?.id === session.id;
+    let streamed = "", settled = false, committed = false;
+    const el = this.messagesEl.createDiv({ cls: "cobrain-bubble cobrain-bubble-assistant" });
+    const who = el.createDiv({ cls: "cobrain-who", text: "副脑" });
+    const body = el.createDiv({ cls: "cobrain-body cobrain-stream", text: "思考中…" });
+    const copy = who.createEl("button", { text: "复制", cls: "cobrain-copy" });
+    copy.setAttribute("aria-label", "复制这条回答");
+    copy.onclick = () => this.ui(async () => { await navigator.clipboard.writeText(streamed); new Notice("已复制"); });
+    if (this.following) this.scrollToBottom();
+    const finish = async (text: string) => {
+      if (!active()) return;
+      body.removeClass("cobrain-stream");
+      await this.renderAssistant(body, text);
+      if (this.following) this.scrollToBottom();
     };
-    const dir = row.createEl("button", {
-      cls: "cobrain-action-btn",
-      text: s.conceptMapDirection === "TD" ? "改左右布局重画" : "改上下布局重画",
-    });
-    dir.onclick = () => redraw(() => {
-      s.conceptMapDirection = s.conceptMapDirection === "TD" ? "LR" : "TD";
-    });
-    for (const d of ["简", "中", "详"] as const) {
-      const b = row.createEl("button", { text: d, cls: "cobrain-action-btn" });
-      b.disabled = s.conceptMapDetail === d;
-      b.setAttribute("title", `以「${d}」详细度重画`);
-      b.onclick = () => redraw(() => { s.conceptMapDetail = d; });
-    }
-  }
-
-  private async doConceptMap(): Promise<void> {
-    if (!this.history.length) {
-      new Notice("先聊点什么，再画概念图");
-      return;
-    }    if (!this.acquire()) return;
-    const bubble = this.streamingBubble("画概念图中…");
     try {
-      // 概念图不逐字流式：半截 Mermaid 渲染不出来，等完整结果一次上屏
-      const raw = await this.runCancellable(this.plugin.tutor.conceptMap(this.history, {
-        signal: this.currentSignal(),
-        earlierSummary: this.earlierSummaryFor(SUMMARY_HISTORY_LIMIT),
-      }));
-      this.lastMermaid = extractMermaid(raw);
-      await bubble.finish(this.lastMermaid ?? "（未能生成有效的概念图）\n\n" + raw);
-      this.addConceptMapControls(bubble.el);
-      this.persistDraft();
-    } catch (e) {
-      this.lastMermaid = null; // 失败不保留上一个话题的旧图，避免存笔记时把陈旧图串进去
-      bubble.remove();
-      if (!(e instanceof CancelledError)) this.addBubble("assistant", "概念图失败：" + errMsg(e));
-    } finally {
-      this.release();
-    }
-  }
-
-  private async doCritique(): Promise<void> {
-    if (!this.history.length) {
-      new Notice("还没有对话可推敲");
-      return;
-    }
-    if (!this.acquire()) return;
-    const bubble = this.streamingBubble("推敲中…");
-    let streamed = "";
-    let settled = false;
-    try {
-      const reply = await this.runCancellable(this.plugin.tutor.critique(this.history, {
-        signal: this.currentSignal(),
-        earlierSummary: this.earlierSummaryFor(SUMMARY_HISTORY_LIMIT),
-        onDelta: t => {
-          if (settled) return;
-          streamed += t;
-          bubble.append(t);
-        },
-      }));
+      await this.plugin.persistSession(session);
+      this.refreshSessionHeader();
+      const work = async () => {
+        const documents = await readMaterials(this.app, references);
+        if (abort.signal.aborted) throw new CancelledError();
+        const opts: ContextOpts = {
+          documents, summary: session.contextSummary, signal: abort.signal,
+          onDelta: delta => {
+            if (settled || !active()) return;
+            streamed += delta; body.setText(streamed);
+            if (this.following) this.scrollToBottom();
+          },
+          onSummary: summary => {
+            if (settled || abort.signal.aborted || !active()) return;
+            session.contextSummary = summary;
+          },
+          onStatus: text => { if (!settled && active() && !streamed) body.setText(text); },
+          onPrepared: info => {
+            if (settled || !active()) return;
+            const parts = [
+              ...(info.excerpted.length ? [`${info.excerpted.length} 篇长文使用文内节选`] : []),
+              ...(info.summarizedCount ? [`较早 ${info.summarizedCount} 条已整理，完整记录保留`] : []),
+            ];
+            this.setStatus(parts.join(" · "));
+          },
+        };
+        if (kind === "ask") {
+          const latest = snapshot[snapshot.length - 1];
+          const result = await this.plugin.tutor.ask(snapshot.slice(0, -1), latest.content, opts);
+          return { text: result.reply, sources: result.sources };
+        }
+        const text = kind === "critique" ? await this.plugin.tutor.critique(snapshot, opts) : await this.plugin.tutor.conceptMap(snapshot, opts);
+        return { text, sources: references.map(r => r.path) };
+      };
+      const cancellable = makeCancellable(work()); this.currentCancel = cancellable.cancel;
+      const result = await cancellable.result;
+      settled = true; streamed = result.text;
+      session.history.push({ role: "assistant", content: result.text });
+      committed = true;
+      for (const path of result.sources) if (!session.sources.includes(path)) session.sources.push(path);
+      if (kind === "concept") session.lastMermaid = extractMermaid(result.text);
+      el.dataset.historyIndex = String(session.history.length - 1);
+      await this.plugin.persistSession(session);
+      await finish(result.text);
+    } catch (error) {
       settled = true;
-      await bubble.finish(reply);
-      this.appendHistory({ role: "assistant", content: reply });
-      this.maybeUpdateSummary();
-    } catch (e) {
-      settled = true;
-      if (e instanceof CancelledError) {
-        if (streamed.trim()) {
-          await bubble.finish(streamed);
-          this.appendHistory({ role: "assistant", content: streamed });
-        } else bubble.remove();
-      } else {
-        bubble.remove();
-        this.addBubble("assistant", "推敲失败：" + errMsg(e));
+      if (streamed.trim() && !committed) {
+        session.history.push({ role: "assistant", content: streamed });
+        for (const reference of references) if (!session.sources.includes(reference.path)) session.sources.push(reference.path);
+        el.dataset.historyIndex = String(session.history.length - 1);
+        await finish(streamed);
+      } else if (committed && streamed.trim()) await finish(streamed);
+      else el.remove();
+      await this.plugin.persistSession(session).catch(e => this.plugin.reportError(e));
+      if (active()) {
+        const stopped = abort.signal.aborted || error instanceof CancelledError;
+        const message = stopped ? "已停止，已有内容已保存。" : error instanceof Error ? error.message : String(error);
+        if (kind === "ask" && !streamed.trim()) this.retryLine(message);
+        else this.setStatus(message);
       }
     } finally {
-      this.release();
+      this.currentAbort = null; this.currentCancel = null; this.setBusy(false);
+      this.trimRendered();
+      // 回答结束不主动聚焦输入框，不抢移动端键盘，也不打断往回阅读。
     }
   }
-
-  // 配图：先从对话提炼「值得画的概念 + 隐喻」作为预填（默认是你最后一句话，常是提问、画了没意义），
-  // 你可改概念 → LLM 扩写成详细视觉提示词 → 你编辑确认 → 出图。
-  private async doImage(): Promise<void> {
-    let seed = this.currentTopic();
-    if (this.history.length) {
-      if (!this.acquire()) return;
-      const t = timedNotice("构思配图主题中…");
-      let cancelled = false;
-      try {
-        seed = await this.runCancellable(this.plugin.tutor.imageConcept(this.history, this.currentSignal()));
-      } catch (e) {
-        if (e instanceof CancelledError) cancelled = true;
-        // 其它失败：回退到最近发言，不打断配图
-      } finally {
-        t.stop();
-        this.release();
-      }
-      if (cancelled) return; // 停止：中止整个配图流程
-    }
-    if (!seed) { new Notice("先聊点什么，再配图"); return; }
-    const concept = await askPrompt(this.app, "给哪个概念配图？", seed);
-    if (concept) await this.runImageFromConcept(concept);
+  private retryLine(message: string): void {
+    const row = this.messagesEl.createDiv({ cls: "cobrain-retry", attr: { role: "status" } });
+    row.createSpan({ text: message });
+    row.createEl("button", { text: "继续回答" }).onclick = () => this.ui(() => this.startResponse("ask"));
   }
-
-  // 概念 → 扩写视觉提示词 → 编辑确认 → 出图 → 嵌入。doImage 与「存为笔记」的可选配图共用。
-  // 成功返回 ![[path]] 并存入 lastImageEmbed；任意环节取消/失败返回 null。
-  private async runImageFromConcept(concept: string): Promise<string | null> {
-    if (!this.acquire()) return null;
-    let scene: string;
-    const t = timedNotice("扩写配图提示词中…");
-    try {
-      scene = await this.runCancellable(this.plugin.tutor.imagePrompt(concept, this.currentSignal()));
-    } catch (e) {
-      if (!(e instanceof CancelledError)) new Notice("提示词扩写失败：" + errMsg(e));
-      return null;
-    } finally {
-      t.stop();
-      this.release(); // 扩写完即释放：用户编辑提示词期间不该锁住对话面板
-    }
-    const style = this.plugin.settings.imageStyle;
-    const fullPrompt = [scene.trim(), style ? `风格：${style}` : "", "画面中不要出现任何文字。"]
-      .filter(Boolean)
-      .join("\n\n");
-    const finalPrompt = await askTextArea(this.app, "确认 / 编辑配图提示词", fullPrompt);
-    if (!finalPrompt) return null;
-    if (!this.acquire()) return null;
-    const bubble = this.streamingBubble(`为「${concept}」配图中…（图像生成较慢，约 1 分钟）`);
-    try {
-      const buf = await this.runCancellable(this.plugin.image.generate(finalPrompt));
-      const path = await saveImage(this.app, this.plugin.settings, buf);
-      this.lastImageEmbed = `![[${path}]]`;
-      await bubble.finish(`「${concept}」配图：\n\n${this.lastImageEmbed}`);
-      this.persistDraft();
-      return this.lastImageEmbed;
-    } catch (e) {
-      bubble.remove();
-      if (!(e instanceof CancelledError)) this.addBubble("assistant", "配图失败：" + errMsg(e));
-      return null;
-    } finally {
-      this.release();
-    }
+  stop(): void { this.currentAbort?.abort(); this.currentCancel?.(); }
+  async waitForCompletion(): Promise<void> { if (this.currentTask) await this.currentTask; }
+  async replaceDeletedSession(id: string, replacement: ChatSession): Promise<void> {
+    if (this.session?.id !== id) return;
+    this.session = null;
+    await this.openSession(replacement);
   }
-
-  private async doSaveNote(): Promise<void> {
-    if (!this.history.length) {
-      new Notice("还没有对话可保存");
-      return;
+  private async saveAsNote(): Promise<void> {
+    if (!this.session || !this.session.history.length || this.busy) return;
+    const current = this.session;
+    const snapshot = JSON.parse(JSON.stringify(current)) as ChatSession;
+    const signature = sessionSignature(snapshot);
+    if (current.lastSavedNote?.stateSignature === signature) {
+      await this.app.workspace.openLinkText(current.lastSavedNote.path, ""); return;
     }
-    const currentSignature = this.stateSignature();
-    if (this.lastSavedNote?.stateSignature === currentSignature) {
-      this.savedNotice("这段对话和当前产物已保存过：", this.lastSavedNote.path);
-      return;
-    }
-    if (this.lastSavedNote) new Notice("对话或产物已变化，将保存新版本");
-
-    // 先冻结本次保存要用的材料。弹窗期间用户继续聊天，也不会悄悄混进这篇笔记。
-    const historySnapshot = this.history.map(m => ({ ...m }));
-    const sourcesSnapshot = [...this.sources].sort();
-    const mermaidSnapshot = this.lastMermaid;
-    const summarySnapshot = this.earlierSummaryFor(SUMMARY_HISTORY_LIMIT);
-    let imageSnapshot = this.lastImageEmbed;
-
-    if (!this.acquire()) return;
-    let title = "", body = "";
-    const t = timedNotice("整理成笔记中…");
-    try {
-      ({ title, body } = await this.runCancellable(this.plugin.tutor.summarizeNote(historySnapshot, {
-        signal: this.currentSignal(),
-        earlierSummary: summarySnapshot,
-      })));
-    } catch (e) {
-      if (!(e instanceof CancelledError)) new Notice("整理失败：" + errMsg(e));
-      t.stop();
-      this.release();
-      return;
-    }
-    t.stop();
-    this.release(); // 下面要弹选项框、可能还要长时出图，期间不锁面板
-
-    // 保存选项：标题可就地编辑（LLM 起的不满意别让用户存完改文件名）+ 附提问 + 配图。取消则中止。
-    const opts = await askSaveOptions(this.app, title, {
-      append: this.plugin.settings.appendConversation,
-      hasImage: false, // 始终显示配图复选框，不自动带入
-    });
-    if (!opts) return; // 取消，不落盘
-    const finalTitle = opts.title; // modal 已兜底非空
-    if (opts.image && !imageSnapshot) {
-      imageSnapshot = await this.runImageFromConcept(finalTitle); // 自行管理 acquire/release
-    }
-
-    // 落盘
-    if (!this.acquire()) return;
-    try {
-      // 只附用户的提问（原始问题），不含 AI 回答
-      const conversation = opts.append
-        ? historySnapshot.filter(m => m.role === "user").map(m => `**你**：${m.content}`).join("\n\n")
-        : null;
-      const path = await saveNote(this.app, this.plugin.settings, {
-        title: finalTitle,
-        body,
-        sources: sourcesSnapshot,
-        mermaid: mermaidSnapshot,
-        imageEmbed: opts.image ? imageSnapshot : null, // 只有勾选才加配图
-        conversation,
+    const abort = new AbortController(); this.currentAbort = abort; this.setBusy(true); this.setStatus("正在整理为笔记…");
+    const work = async () => {
+      const documents = await readMaterials(this.app, snapshot.materials);
+      if (abort.signal.aborted) throw new CancelledError();
+      return this.plugin.tutor.summarizeNote(snapshot.history, {
+        documents, summary: snapshot.contextSummary, signal: abort.signal,
+        onSummary: summary => { if (!abort.signal.aborted) current.contextSummary = summary; },
       });
-      this.savedNotice("已保存：", path);
-      this.addSavedNoteLine(path);
-      // 状态消费抽成纯函数 consumeSavedSnapshot（含签名口径不变量说明），便于单测去重逻辑。
-      const consumed = consumeSavedSnapshot(
-        { lastMermaid: this.lastMermaid, lastImageEmbed: this.lastImageEmbed },
-        { history: historySnapshot, sources: sourcesSnapshot, mermaid: mermaidSnapshot, imageEmbed: imageSnapshot },
-        path,
-        Date.now(),
-      );
-      this.lastMermaid = consumed.lastMermaid;
-      this.lastImageEmbed = consumed.lastImageEmbed;
-      for (const s of consumed.consumedSources) this.sources.delete(s);
-      this.lastSavedNote = consumed.lastSavedNote;
-      this.persistDraft();
-    } catch (e) {
-      new Notice("保存失败：" + errMsg(e));
-    } finally {
-      this.release();
+    };
+    const cancellable = makeCancellable(work()); this.currentCancel = cancellable.cancel;
+    const task = cancellable.result.then(() => undefined, () => undefined); this.currentTask = task;
+    let note: { title: string; body: string };
+    try { note = await cancellable.result; }
+    catch (e) { if (!abort.signal.aborted && !(e instanceof CancelledError)) this.plugin.reportError(e); return; }
+    finally {
+      if (this.currentTask === task) this.currentTask = null;
+      if (this.currentAbort === abort) { this.currentAbort = null; this.currentCancel = null; this.setBusy(false); this.setStatus(""); }
     }
-  }
-
-  private async doClearDraft(): Promise<void> {
-    if (!this.history.length) {
-      new Notice("当前没有对话草稿");
-      return;
+    if (abort.signal.aborted || this.closed) return;
+    // 只把请求计入在途任务；编辑预览弹窗不占住会话切换或关闭。保存始终使用冻结快照。
+    const options = await askSaveOptions(this.app, note.title, note.body, this.plugin.settings.appendConversation);
+    if (!options) return;
+    const path = await saveNote(this.app, this.plugin.settings, {
+      title: options.title, body: options.body,
+      sources: [...new Set([...snapshot.sources, ...snapshot.materials.map(m => m.path)])],
+      mermaid: snapshot.lastMermaid,
+      conversation: options.append ? snapshot.history.filter(m => m.role === "user").map(m => `**我**\n\n${m.content}`).join("\n\n") : null,
+    });
+    if (this.plugin.sessions.has(current.id)) {
+      current.lastSavedNote = { stateSignature: signature, path, savedAt: Date.now() };
+      await this.plugin.persistSession(current);
     }
-    const confirmed = await askConfirm(this.app, "清空当前对话", "会删除这个面板的消息和草稿，不会删除已经保存的笔记。", "清空");
-    if (!confirmed) return;
-    this.history = [];
-    this.sources.clear();
-    this.lastMermaid = null;
-    this.lastImageEmbed = null;
-    this.lastSavedNote = null;
-    this.contextSummary = null;
-    this.summaryGen++; // 在途的后台摘要作废，别把旧对话的摘要写回清空后的面板
-    this.pendingSourceContexts = [];
-    this.inputEl.value = "";
-    this.autoGrow();
-    this.plugin.clearChatDraft(this.instanceId);
-    this.resetConversationUi();
-    new Notice("当前对话已清空");
+    new Notice(`已保存笔记：${path}`);
   }
-
+  private async exportConversation(): Promise<void> {
+    if (!this.session) return;
+    const snapshot = JSON.parse(JSON.stringify(this.session)) as ChatSession;
+    const path = await saveConversation(this.app, this.plugin.settings, snapshot.title, conversationMarkdown(snapshot));
+    new Notice(`完整会话已导出：${path}`);
+  }
   async onClose(): Promise<void> {
-    // 面板已关：在途的后台摘要作废（其 persistDraft 会以关闭时的旧状态覆盖新面板的草稿）
-    this.summaryGen++;
-    // 关闭即把当前草稿落盘：saveChatDraft 走防抖，关闭时强制冲一次，避免丢最后改动
-    this.plugin.flushDrafts();
-    this.contentEl.empty();
-    // 释放实例 ID，允许再次使用这个槽位
-    this.plugin.releaseViewId(this.instanceId);
+    this.closed = true; this.stop();
+    if (this.currentTask) await this.currentTask;
+    if (this.session) await this.plugin.persistSession(this.session);
+    this.generation++; this.clearMessages(); this.contentEl.empty();
   }
 }

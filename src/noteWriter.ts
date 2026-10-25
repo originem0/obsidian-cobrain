@@ -7,7 +7,6 @@ export interface NotePayload {
   body: string;
   sources: string[];
   mermaid?: string | null;
-  imageEmbed?: string | null;
   conversation?: string | null; // 原始问题（appendConversation 开启时把用户提问附在末尾）
 }
 
@@ -21,7 +20,7 @@ async function ensureFolder(app: App, folder: string): Promise<void> {
   }
 }
 
-// 把导师综述 + 概念图 + 配图 + 相关笔记双链写成一篇结构化笔记，返回路径。
+// 摘要与完整会话分别保存，并标明 AI 参与，避免再次检索时被当作用户原有立场。
 export async function saveNote(app: App, settings: CobrainSettings, p: NotePayload): Promise<string> {
   const folder = normalizePath(settings.noteFolder || "cobrain-note");
   await ensureFolder(app, folder);
@@ -31,11 +30,10 @@ export async function saveNote(app: App, settings: CobrainSettings, p: NotePaylo
   const tags = (settings.noteTags || "").split(/[，,]/).map(t => t.trim()).filter(Boolean);
   const body = stripTrailingRelatedSection(p.body);
   const parts: string[] = ["---", `date: ${date}`];
-  if (tags.length) parts.push(`tags: [${tags.join(", ")}]`);
-  parts.push("status: seedling");
+  if (tags.length) parts.push(`tags: ${JSON.stringify(tags)}`);
+  parts.push("status: seedling", "cobrain_generated: true", "cobrain_kind: summary");
   parts.push("---", "", `# ${p.title}`, "", body, "");
   if (p.mermaid) parts.push(p.mermaid, "");
-  if (p.imageEmbed) parts.push(p.imageEmbed, "");
   if (p.sources?.length) {
     parts.push("## 相关", "");
     for (const s of p.sources) parts.push(`- ${formatWikiLink(s)}`);
@@ -52,11 +50,10 @@ export async function saveNote(app: App, settings: CobrainSettings, p: NotePaylo
   return path;
 }
 
-// 保存配图到附件目录，返回 vault 相对路径（供 ![[path]] 嵌入）。
-export async function saveImage(app: App, settings: CobrainSettings, buf: ArrayBuffer): Promise<string> {
-  const folder = normalizePath(settings.attachmentFolder || "cobrain-note/附件");
+export async function saveConversation(app: App, settings: CobrainSettings, title: string, markdown: string): Promise<string> {
+  const folder = normalizePath(`${settings.noteFolder || "cobrain-note"}/会话记录`);
   await ensureFolder(app, folder);
-  const path = `${folder}/cobrain-${Date.now()}.png`;
-  await app.vault.createBinary(path, buf);
+  const path = `${folder}/${sanitizeFilename(title)} ${Date.now()}.md`;
+  await app.vault.create(path, `---\ncobrain_generated: true\ncobrain_kind: conversation\n---\n\n${markdown}`);
   return path;
 }

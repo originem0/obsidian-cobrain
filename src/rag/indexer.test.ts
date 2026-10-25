@@ -9,7 +9,7 @@ import { Indexer, shouldIndexPath, REINDEX_CONCURRENCY } from "./indexer";
 import { VectorStore } from "./vectorStore";
 
 test("shouldIndexPath 排除配置目录和隐藏目录片段，但默认不排除 cobrain-note", () => {
-  const settings = { indexExcludeFolders: "Templates\nArchive" };
+  const settings = { indexEnabled: true, indexIncludeFolders: ".", indexExcludeFolders: "Templates\nArchive" };
 
   expect(shouldIndexPath("notes/a.md", settings)).toBe(true);
   expect(shouldIndexPath("cobrain-note/a.md", settings)).toBe(true);
@@ -19,7 +19,7 @@ test("shouldIndexPath 排除配置目录和隐藏目录片段，但默认不排�
 });
 
 test("shouldIndexPath 仍允许用户显式排除 cobrain-note", () => {
-  expect(shouldIndexPath("cobrain-note/a.md", { indexExcludeFolders: "cobrain-note" })).toBe(false);
+  expect(shouldIndexPath("cobrain-note/a.md", { indexEnabled: true, indexIncludeFolders: ".", indexExcludeFolders: "cobrain-note" })).toBe(false);
 });
 
 test("Indexer onModify 成功后更新 store、持久化分片和状态", async () => {
@@ -36,7 +36,7 @@ test("Indexer onModify 成功后更新 store、持久化分片和状态", async 
     saveFile: jest.fn(async () => undefined),
     removeFile: jest.fn(async () => undefined),
   };
-  const indexer = new Indexer(app as any, embedder as any, store, { indexExcludeFolders: "" });
+  const indexer = new Indexer(app as any, embedder as any, store, { indexEnabled: true, indexIncludeFolders: ".", indexExcludeFolders: "" });
 
   await indexer.onModify({ path: "a.md", stat: { mtime: 123 } } as any, persist as any);
 
@@ -52,7 +52,7 @@ test("Indexer onModify 成功后更新 store、持久化分片和状态", async 
 });
 
 test("Indexer 记录失败，并在同一路径成功变更后清掉失败", () => {
-  const indexer = new Indexer({} as any, {} as any, new VectorStore(), { indexExcludeFolders: "" });
+  const indexer = new Indexer({} as any, {} as any, new VectorStore(), { indexEnabled: true, indexIncludeFolders: ".", indexExcludeFolders: "" });
 
   indexer.recordFailure("a.md", new Error("嵌入失败"));
   expect(indexer.getStatus().failures).toEqual([
@@ -83,7 +83,7 @@ function fullReindexFixture(fileCount: number, embedDocuments: jest.Mock) {
     removeFile: jest.fn(async () => undefined),
     finalize: jest.fn(async () => undefined),
   };
-  const indexer = new Indexer(app as any, { embedDocuments } as any, store, { indexExcludeFolders: "" });
+  const indexer = new Indexer(app as any, { embedDocuments } as any, store, { indexEnabled: true, indexIncludeFolders: ".", indexExcludeFolders: "" });
   return { indexer, store, persist };
 }
 
@@ -124,4 +124,19 @@ test("reindexAll 并发下单篇失败不拖垮整轮，失败被记录、其余
     { path: "f3.md", message: "嵌入 API 抖动", at: expect.any(Number) },
   ]);
   expect(persist.finalize).toHaveBeenCalled(); // 整轮仍然收尾
+});
+
+
+test("读取文档在途时撤销范围，不会把内容发送到嵌入端点", async () => {
+  let resolve!: (text: string) => void;
+  const settings = { indexEnabled: true, indexIncludeFolders: "自己的笔记", indexExcludeFolders: "" };
+  const embedDocuments = jest.fn(async () => [[1, 0]]);
+  const indexer = new Indexer({ vault: { cachedRead: () => new Promise<string>(done => { resolve = done; }) } } as any,
+    { embedDocuments, embedQuery: jest.fn() }, new VectorStore(), settings);
+  const persist = { removeFile: jest.fn(async () => undefined), saveFile: jest.fn() };
+  const pending = indexer.onModify({ path: "自己的笔记/a.md", stat: { mtime: 1 } } as any, persist as any);
+  settings.indexEnabled = false;
+  resolve("这段原文不能在撤销后上传");
+  await pending;
+  expect(embedDocuments).not.toHaveBeenCalled();
 });

@@ -40,6 +40,12 @@ jobs:
       - name: Build
         run: npm run build
 
+      - name: Test
+        run: npm test -- --runInBand
+
+      - name: Package plugin
+        run: zip "cobrain-${GITHUB_REF_NAME}.zip" main.js manifest.json styles.css
+
       # 给发布产物生成构建溯源签名：用户可用 `gh attestation verify` 验证产物确由本仓库源码构建。
       - name: Attest build provenance
         uses: actions/attest-build-provenance@v2
@@ -48,12 +54,17 @@ jobs:
             main.js
             manifest.json
             styles.css
+            cobrain-${{ github.ref_name }}.zip
 
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          NOTES=(--generate-notes)
+          if [ -f "docs/${GITHUB_REF_NAME}-change-notes.md" ]; then
+            NOTES=(--notes-file "docs/${GITHUB_REF_NAME}-change-notes.md")
+          fi
           gh release create "$GITHUB_REF_NAME" \
             --title "$GITHUB_REF_NAME" \
-            --generate-notes \
-            main.js manifest.json styles.css
+            "${NOTES[@]}" \
+            main.js manifest.json styles.css "cobrain-${GITHUB_REF_NAME}.zip"

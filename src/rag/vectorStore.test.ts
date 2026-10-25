@@ -151,3 +151,14 @@ test("query 按最低分过滤命中", async () => {
   const hits = await s.query([1, 0], 5, 0.2);
   expect(hits.map(h => h.path)).toEqual(["a.md"]);
 });
+
+
+test("大库检索让出主线程期间撤销范围，最终结果也不会包含被撤销的材料", async () => {
+  (globalThis as any).window = globalThis;
+  const store = new VectorStore();
+  store.setFile("原先允许.md", 1, Array.from({ length: 8100 }, () => ({ text: "材料", heading: "", vector: [1, 0] })));
+  let allowed = true;
+  const pending = store.query([1, 0], 1, 0, () => allowed);
+  allowed = false;
+  expect(await pending).toEqual([]);
+});

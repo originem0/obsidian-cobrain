@@ -4,7 +4,7 @@ import { VectorStore } from "./vectorStore";
 import { chunkMarkdown } from "./chunker";
 import { fnv1a } from "../util/hash";
 import { IndexStore } from "./indexStore";
-import type { CobrainSettings } from "../settings";
+import { allowedIndexPath, type IndexScopeSettings } from "./scope";
 
 export type IndexFileResult = "saved" | "removed" | "unchanged";
 export interface IndexFailure { path: string; message: string; at: number; }
@@ -18,20 +18,7 @@ export interface IndexStatus {
   failures: IndexFailure[];
 }
 
-function excludedFolders(raw: string): string[] {
-  return raw
-    .split(/[\n,，]/)
-    .map(s => s.trim().replace(/\\/g, "/").replace(/^\/+|\/+$/g, ""))
-    .filter(Boolean);
-}
-
-export function shouldIndexPath(path: string, settings: Pick<CobrainSettings, "indexExcludeFolders">): boolean {
-  const normalized = path.replace(/\\/g, "/");
-  const parts = normalized.split("/");
-  if (parts.slice(0, -1).some(part => part.startsWith("."))) return false;
-  const excludes = excludedFolders(settings.indexExcludeFolders);
-  return !excludes.some(folder => normalized === folder || normalized.startsWith(folder + "/"));
-}
+export const shouldIndexPath = allowedIndexPath;
 
 export class Indexer {
   private running = false; // 防「重建索引」重入：两个全量重建并发会互踩 store 与分片写
@@ -42,7 +29,7 @@ export class Indexer {
     private app: App,
     private embedder: Embedder,
     private store: VectorStore,
-    private settings: Pick<CobrainSettings, "indexExcludeFolders">,
+    private settings: IndexScopeSettings,
   ) {}
 
   private async indexFile(file: TFile, persist: IndexStore, force: boolean): Promise<IndexFileResult> {
@@ -75,7 +62,10 @@ export class Indexer {
     // 内容已变，旧向量不能继续冒充新文件。先移除旧分片；嵌入失败时宁可无索引。
     this.store.removeFile(file.path);
     await persist.removeFile(file.path);
+    if (!shouldIndexPath(file.path, this.settings)) return "removed";
     const vectors = await this.embedder.embedDocuments(chunks.map(c => c.text));
+    // 嵌入请求在途时用户可能收窄允许范围；迟到结果不能重新放回被排除的笔记。
+    if (!shouldIndexPath(file.path, this.settings)) return "removed";
     if (vectors.length !== chunks.length) {
       throw new Error(`嵌入返回数量不匹配：请求 ${chunks.length}，返回 ${vectors.length}`);
     }

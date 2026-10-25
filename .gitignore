@@ -6,3 +6,4 @@ data.json
 .claude/
 ort-wasm-simd-threaded.jsep.mjs
 ort-wasm-simd-threaded.jsep.wasm
+.audit/

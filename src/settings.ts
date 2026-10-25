@@ -2,25 +2,21 @@ import { App, PluginSettingTab, Setting, Notice, DropdownComponent, Platform } f
 import { classifyModels, detectEmbeddingModels, listModels, testChat } from "./llm/probe";
 import { ensureCurrentOption } from "./llm/modelClassifier";
 import type CobrainPlugin from "./main";
+import { fnv1a } from "./util/hash";
 
 export interface CobrainSettings {
   llmBaseUrl: string;
   llmKey: string;
   llmModel: string;
-  imageBaseUrl: string;
-  imageKey: string;
-  imageModel: string;
-  imageStyle: string;       // 配图风格预设，拼接到出图提示词尾部
-  imageQuality: string;     // 质量档位；空=不发送该参数（兼容不支持的代理）
-  imageSize: string;        // 出图尺寸
   embedBaseUrl: string;
   embedKey: string;
   embedModel: string;
   noteFolder: string;
-  attachmentFolder: string;
+  indexEnabled: boolean;
+  indexIncludeFolders: string;
+  contextBudgetTokens: number;
   indexExcludeFolders: string; // 逗号/换行分隔，重建和自动索引时跳过
   retrievalMinScore: number;   // 检索命中最低相似度，低于此值不展示、不喂模型
-  queryRewriteEnabled: boolean; // 多轮对话时先让文本模型把最新发言改写成自包含检索 query（补全指代）
   noteTags: string;             // 逗号分隔，写入笔记 frontmatter tags
   appendConversation: boolean;  // 存笔记时是否附上你的提问（原始问题，不含 AI 回答）
   conceptMapDirection: string;  // Mermaid 方向：TD / LR
@@ -34,42 +30,14 @@ export interface CobrainSettings {
 // 人设是「助产士」而非「讲解员」：基于用户自己的笔记回抛问题、逼他自己想，而不是灌输。
 // 任务路由只写在这里（不再写进 tutor.ts 的运行时规则）：路由是策略、归用户可编辑的人设管；
 // 运行时规则只放不变量，避免用户自定义人设被硬编码规则拆台。
-const DEFAULT_TUTOR_PROMPT = `你是用户的「思考助产士」，服务于他的创作：帮他把经验、旧笔记和当前问题的碰撞，长成带有他自己判断的新表达。你不是顺从的答案机，目标是让他形成可迁移的理解，而不是把话补圆。
-
----
-
-**一、先判断任务**
-- 用户表达困惑、卡顿、矛盾时，先抛一个有摩擦力的问题，再给必要解释。
-- 用户明确要求解释时，先给骨架，再指出关键盲点，最后只留一个追问。
-- 用户要求总结、改写、生成、修复、列方案时，直接完成，不强行苏格拉底式提问。
-
-**二、旧笔记是碰撞材料，不是答案**
-「已有笔记」代表用户写过什么，不等于他真正理解了什么。每轮检索材料至多真正用起来 1-2 篇最相关的——引用其观点并回应；其余忽略，不要逐条罗列点评。碰撞方式取其一：
-- 差异：旧笔记和他现在的说法在哪一点上走向不同？
-- 失洽：旧笔记的结论和当前问题哪里对不上、互相冲突？
-- 意外：这篇看似无关的旧笔记，和当前问题有什么没料到的连接？
-- 回溯：他当时为什么那样想？那个思路放到现在还成立吗？
-引用时只用本轮材料里出现的 wikilink，不要编造来源。
-
-**三、提问要有摩擦，但每轮只问一个**
-优先用三类问题：
-- 差异性发问：A 和 B 在这一点上为何走向不同？
-- 辩证逆转：会不会正是这个障碍，才让那件事得以成立？
-- 解构前提：这个说法依赖哪个前提？它真的成立吗？
-
-避免「你怎么理解 X」这类空泛问题。无论多想多问，每轮最多留一个追问，问最要害的那个——三个问题是审讯，一个好问题才是助产。
-
-**四、克制但不偷懒**
-不要主动给完整百科式解释。用户卡住或明确要解释时，先骨架后细节，够用即止。用户卡在抽象语言里，就逼他给具体例子；用户陷在细节里，就逼他抽出背后的原则。
-
-**五、不讨好，不补白**
-不评价用户「很精准」「很坦诚」「抓到核心」。说得稳，直接推进；说得不稳，直接指出哪里不稳。不替用户把话说圆、把感受说满——他还没说出口的，正是他需要去想的。
-
-**六、想清楚了就推他落笔**
-当一个想法真正成形——立场站住了、论证闭合了、或一个概念被他自己说清了——用一句话指出它值得留下：说出它可以成为一篇什么笔记（一个概念、一个框架、或一串待展开的追问），提示他用「存为笔记」固化。只在成形的时刻提，不要每轮都催。创作的终点是表达，不是想过。
-
----
-中文回答，简洁有重点；类比优先找结构同构的意象（不求精确定义，求模式相似），可用 Markdown。`;
+export const DEFAULT_TUTOR_PROMPT = `你是用户的思考伙伴。围绕他明确选择的文档和问题，帮助他解释概念、检验前提、推敲论证、形成自己的判断。
+- 用户提问时直接推进问题；需要澄清时只问最关键的一个问题。
+- 用户要求解释、总结、改写或列方案时，直接完成，不强行追问。
+- 文档可能来自别人、摘录或 AI 整理。区分原作者的观点、用户明确表达的判断，以及你提出的解释和假设。不从文件归属推断思想归属。
+- 只讨论当前会话明确附加的材料。材料没有涵盖的部分，说明依据不足，不假装读过全文或检索过其它笔记。
+- 引用材料时使用给出的来源链接，具体回应其论点，不逐条罗列。
+- 不讨好，不替用户补圆立场；有反例或关键盲点时直接指出。
+- 中文回答，简洁自然。观点成形时可以提示保存，避免每轮催促。`;
 
 // 只管语义（选哪些概念、关系怎么标、暴露缺口）；格式硬约束在 tutor.ts 的 mermaidRules 里，
 // 方向/节点数也由 conceptMapDirection / conceptMapDetail 注入——用户随便改这段都破坏不了渲染。
@@ -83,7 +51,7 @@ const DEFAULT_NOTE_PROMPT = `你即将把这段对话蒸馏成一张 Obsidian �
 第一行必须用 \`标题：xxx\` 给出具体可检索的标题（「XX 的核心张力」优于「今日对话」）。不要输出 frontmatter；插件保存时会写入 tags、date、status: seedling。
 
 **笔记声音属于用户，不属于 AI**
-用第一人称或中性视角写，不写「用户认为……」「AI 提出……」，也不出现「本次对话」「我们聊到」这类会话痕迹。记录思考轨迹，不记录对话过程。
+用户明确认可的判断可用第一人称。外部文档的观点保留作者归属；副脑提出但未经用户确认的解释写成待验证的假设，不能冒充用户已有立场。记录思考轨迹，不替用户补立场。
 
 ---
 
@@ -117,20 +85,15 @@ export const DEFAULT_SETTINGS: CobrainSettings = {
   llmBaseUrl: "",
   llmKey: "",
   llmModel: "",
-  imageBaseUrl: "",
-  imageKey: "",
-  imageModel: "",
-  imageStyle: "现代扁平矢量教学插画，简洁有冲击力的构图，高对比柔和配色，主体居中，适度留白",
-  imageQuality: "",
-  imageSize: "1024x1024",
   embedBaseUrl: "",
   embedKey: "",
   embedModel: "",
   noteFolder: "cobrain-note",
-  attachmentFolder: "cobrain-note/附件",
+  indexEnabled: false,
+  indexIncludeFolders: "",
+  contextBudgetTokens: 24000,
   indexExcludeFolders: DEFAULT_INDEX_EXCLUDE_FOLDERS,
   retrievalMinScore: 0.3,
-  queryRewriteEnabled: true,
   noteTags: "cobrain-note",
   appendConversation: false,
   conceptMapDirection: "TD",
@@ -160,6 +123,11 @@ export function normalizeSettingsData(data: SettingsData): { settings: CobrainSe
     }
     if (typeof value === "string") (settings[key] as string) = value;
   }
+  // 仅迁移旧版原样默认提示词；用户修改过的内容原样保留，来源边界由运行规则兜底。
+  if (fnv1a(settings.tutorPrompt) === "e8d8133a") settings.tutorPrompt = DEFAULT_TUTOR_PROMPT;
+  if (fnv1a(settings.notePrompt) === "ad7b61ea") settings.notePrompt = DEFAULT_SETTINGS.notePrompt;
+  settings.contextBudgetTokens = Math.round(Math.min(128000, Math.max(4096, settings.contextBudgetTokens)));
+  settings.retrievalMinScore = Math.min(1, Math.max(0, settings.retrievalMinScore));
   if (settings.indexExcludeFolders.trim() === LEGACY_DEFAULT_INDEX_EXCLUDE_FOLDERS) {
     settings.indexExcludeFolders = DEFAULT_INDEX_EXCLUDE_FOLDERS;
   }
@@ -169,20 +137,18 @@ export function normalizeSettingsData(data: SettingsData): { settings: CobrainSe
 
 // 只允许把值为 string 的设置键传给文本/文本域助手，避免把 boolean 键喂进去
 type StringKeys = { [K in keyof CobrainSettings]: CobrainSettings[K] extends string ? K : never }[keyof CobrainSettings];
-type EndpointKind = "chat" | "image" | "embed";
+type EndpointKind = "chat" | "embed";
 type EndpointStatus = { state: "untested" | "ok" | "fail"; text?: string };
 // 各端点对应的 model 设置键,供就地刷新下拉时回查当前值
-const MODEL_KEY: Record<EndpointKind, StringKeys> = { chat: "llmModel", image: "imageModel", embed: "embedModel" };
+const MODEL_KEY: Record<EndpointKind, StringKeys> = { chat: "llmModel", embed: "embedModel" };
 
 export class CobrainSettingTab extends PluginSettingTab {
-  private detected: { chat: string[]; image: string[]; embed: { id: string; dim: number }[] } = {
+  private detected: { chat: string[]; embed: { id: string; dim: number }[] } = {
     chat: [],
-    image: [],
     embed: [],
   };
   private status: Record<EndpointKind, EndpointStatus> = {
     chat: { state: "untested" },
-    image: { state: "untested" },
     embed: { state: "untested" },
   };
   // 状态灯 / 模型下拉的元素引用,用于改 URL/Key 后就地刷新而不整页重绘(整页重绘会让输入框失焦)
@@ -203,23 +169,19 @@ export class CobrainSettingTab extends PluginSettingTab {
       keyKey: "llmKey",
       modelKey: "llmModel",
     });
-    this.renderEndpointSection(containerEl, {
-      title: "图像",
-      kind: "image",
-      urlKey: "imageBaseUrl",
-      keyKey: "imageKey",
-      modelKey: "imageModel",
-    });
-    this.renderEndpointSection(containerEl, {
-      title: "嵌入 API（语义检索）",
+    const retrieval = this.collapsible(containerEl, "可选资料检索", false).body;
+    this.renderEndpointSection(retrieval, {
+      title: "嵌入 API（手动检索时使用）",
       kind: "embed",
       urlKey: "embedBaseUrl",
       keyKey: "embedKey",
       modelKey: "embedModel",
     });
 
-    this.renderConceptMapSection(containerEl);
-    this.renderIndexSection(containerEl);
+    const advanced = this.collapsible(containerEl, "高级设置", false).body;
+    this.renderConversationSection(advanced);
+    this.renderConceptMapSection(advanced);
+    this.renderIndexSection(advanced);
     this.renderNoteSection(containerEl);
     this.renderPromptSection(containerEl);
   }
@@ -229,7 +191,7 @@ export class CobrainSettingTab extends PluginSettingTab {
     opts: { title: string; kind: EndpointKind; urlKey: StringKeys; keyKey: StringKeys; modelKey: StringKeys },
   ): void {
     const s = this.plugin.settings;
-    const { body, status } = this.collapsible(container, opts.title, true);
+    const { body, status } = this.collapsible(container, opts.title, opts.kind === "chat");
     this.statusEls[opts.kind] = status;
     this.paintStatus(status, this.status[opts.kind]);
 
@@ -244,7 +206,7 @@ export class CobrainSettingTab extends PluginSettingTab {
     }
 
     if (opts.kind !== "chat") {
-      // 多数用户三套端点是同一个代理：一键复用文本端点的 URL/Key，砍掉重复粘贴（模型仍需单独检测选择）
+      // 多数用户文本和嵌入端点相同：一键复用文本端点的 URL/Key，砍掉重复粘贴（模型仍需单独检测选择）
       new Setting(body)
         .setName("复用文本端点")
         .setDesc("把文本 LLM 的 Base URL 和 API Key 复制过来，模型仍需单独「检测」选择")
@@ -259,7 +221,6 @@ export class CobrainSettingTab extends PluginSettingTab {
             this.status[opts.kind] = { state: "untested" };
             // 端点已换，旧检测列表作废
             if (opts.kind === "embed") this.detected.embed = [];
-            else this.detected[opts.kind] = [];
             this.plugin.saveSettingsDebounced();
             new Notice("已复制文本端点的 URL 和 Key");
             this.display(); // 整页重绘刷新输入框显示值（显式按钮操作，失焦可接受）
@@ -370,13 +331,6 @@ export class CobrainSettingTab extends PluginSettingTab {
         );
     }
 
-    if (opts.kind === "image") {
-      const note = body.createEl("p", { text: "图像模型不自动测试。出图耗时长且可能计费，请用「配图」功能实测。" });
-      note.setCssStyles({ fontSize: "0.85em", color: "var(--text-muted)", margin: "6px 0 14px" });
-      this.text(body, "尺寸", "如 1024x1024", "imageSize");
-      this.text(body, "质量", "如 high/medium/low 或 hd；留空则不发送（部分代理不支持此参数）", "imageQuality");
-      this.textArea(body, "风格预设", "拼到每张配图提示词尾部，统一画风", "imageStyle");
-    }
   }
 
   private renderConceptMapSection(container: HTMLElement): void {
@@ -408,33 +362,49 @@ export class CobrainSettingTab extends PluginSettingTab {
       });
   }
 
-  private renderIndexSection(container: HTMLElement): void {
-    const s = this.plugin.settings;
-    const { body } = this.collapsible(container, "索引与检索", false);
-
-    this.textArea(body, "排除目录", "逗号或换行分隔；隐藏目录始终跳过", "indexExcludeFolders");
-    new Setting(body)
-      .setName("检索最低分")
-      .setDesc("低于该相似度的命中不展示，也不喂给模型。用「测试检索」看真实分数分布，再决定卡多少")
-      .addButton(b => b.setButtonText("测试检索").onClick(() => this.plugin.openRetrievalTest()))
-      .addSlider(slider => {
-        slider.setLimits(0, 1, 0.01);
-        slider.setValue(s.retrievalMinScore);
-        slider.setDynamicTooltip();
-        slider.onChange(v => {
-          s.retrievalMinScore = v;
-          this.plugin.saveSettingsDebounced();
+  private renderConversationSection(container: HTMLElement): void {
+    const { body } = this.collapsible(container, "长对话", false);
+    new Setting(body).setName("对话输入预算").setDesc("按文本长度保守估算 token；请低于模型的上下文容量，并留出回答空间。超出预算时先整理旧消息，完整记录始终保留。")
+      .addText(t => {
+        t.inputEl.type = "number";
+        t.inputEl.min = "4096";
+        t.inputEl.max = "128000";
+        t.setValue(String(this.plugin.settings.contextBudgetTokens)).onChange(value => {
+          const n = Number(value);
+          if (Number.isFinite(n) && n >= 4096 && n <= 128000) {
+            this.plugin.settings.contextBudgetTokens = Math.round(n);
+            this.plugin.saveSettingsDebounced();
+          }
         });
       });
-    new Setting(body)
-      .setName("多轮检索改写")
-      .setDesc("多轮对话时先让文本模型把最新发言改写成独立检索查询（补全「它/这个」等指代），检索更准，但每轮多一次小请求")
-      .addToggle(t =>
-        t.setValue(s.queryRewriteEnabled).onChange(v => {
-          s.queryRewriteEnabled = v;
-          this.plugin.saveSettingsDebounced();
-        }),
-      );
+  }
+
+  private renderIndexSection(container: HTMLElement): void {
+    const s = this.plugin.settings;
+    const { body } = this.collapsible(container, "索引范围与诊断", false);
+    body.createEl("p", { text: "普通文档对话不需要索引。只在手动检索其它资料时使用；未列入允许目录的笔记不会建立索引，也不会出现在检索结果中。" });
+    new Setting(body).setName("启用可选索引").addToggle(t => t.setValue(s.indexEnabled).onChange(async value => {
+      s.indexEnabled = value;
+      await this.plugin.indexScopeChanged().catch(e => this.plugin.reportError(e));
+    }));
+    const scopeInput = (name: string, key: "indexIncludeFolders" | "indexExcludeFolders", desc: string) => {
+      new Setting(body).setName(name).setDesc(desc).addTextArea(t => {
+        t.setValue(s[key]).onChange(value => { s[key] = value; this.plugin.saveSettingsDebounced(); });
+        // 输入目录名的中间状态不能立刻删除现有索引；失焦后再清理，检索本身始终按最新设置过滤。
+        t.inputEl.addEventListener("blur", () => void this.plugin.indexScopeChanged().catch(e => this.plugin.reportError(e)));
+      });
+    };
+    scopeInput("允许索引的目录", "indexIncludeFolders", "逗号或换行分隔。留空不索引任何笔记；填写一个点表示允许整个库，再应用排除目录。");
+    scopeInput("排除目录", "indexExcludeFolders", "逗号或换行分隔，优先于允许目录；隐藏目录始终跳过。");
+    new Setting(body).setName("检索最低分").addSlider(slider => {
+      slider.setLimits(0, 1, 0.01).setValue(s.retrievalMinScore).setDynamicTooltip().onChange(value => {
+        s.retrievalMinScore = value; this.plugin.saveSettingsDebounced();
+      });
+    });
+    new Setting(body).setName("索引维护")
+      .addButton(b => b.setButtonText("重建允许范围").onClick(() => void this.plugin.rebuildIndex().catch(e => this.plugin.reportError(e))))
+      .addButton(b => b.setButtonText("查看状态").onClick(() => void this.plugin.showIndexStatus().catch(e => this.plugin.reportError(e))))
+      .addButton(b => b.setButtonText("测试检索").onClick(() => this.plugin.openRetrievalTest()));
   }
 
   private renderNoteSection(container: HTMLElement): void {
@@ -442,7 +412,6 @@ export class CobrainSettingTab extends PluginSettingTab {
     const { body } = this.collapsible(container, "笔记", false);
 
     this.text(body, "笔记目录", "存为笔记的目标目录", "noteFolder");
-    this.text(body, "附件目录", "配图保存目录", "attachmentFolder");
     this.text(body, "标签", "逗号分隔，写入 frontmatter tags", "noteTags");
     new Setting(body)
       .setName("附原始问题")
