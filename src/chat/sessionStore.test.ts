@@ -61,7 +61,8 @@ test("会话主文件损坏时恢复上一次备份；目录损坏时扫描原�
   const reloaded = new SessionStore(adapter as unknown as DataAdapter, "plugin/sessions"); await reloaded.init();
   expect((await reloaded.get(session.id)).history[0].content).toBe("已保存的原文");
   expect(reloaded.warnings.some(w => w.includes("备份恢复"))).toBe(true);
-  expect(reloaded.list()).toHaveLength(1);
+  const recovered = await Promise.all(reloaded.list().map(info => reloaded.get(info.id)));
+  expect(recovered.some(s => s.composer === "第二版" && s.history[0].content === "已保存的原文")).toBe(true);
 });
 test("磁盘写失败会拒绝保存，保留可导出的内存原文；下一次写入仍可继续", async () => {
   const { adapter, store } = fixture(); await store.init();
@@ -92,6 +93,21 @@ test("修复损坏的消息格式后不沿用错位的摘要边界", () => {
   expect(restored?.contextSummary).toBeNull();
 });
 
+test("材料只保留有效条目，未知归属按未确认处理", () => {
+  const restored = normalizeSession({ ...newSession(), materials: [
+    { id: "doc", path: "a.md", kind: "document", origin: "self", heading: 3 },
+    { id: "doc", path: "重复.md", kind: "document", origin: "self" },
+    { id: "sel", path: "b.md", kind: "selection", origin: "bogus", text: "原文", heading: "H" },
+    { id: "无原文", path: "c.md", kind: "selection", origin: "self" },
+    { id: "图片", path: "d.png", kind: "image", origin: "self" },
+    { path: "缺标识.md", kind: "document" }, null, "a.md",
+  ] });
+  expect(restored?.materials).toEqual([
+    { id: "doc", path: "a.md", kind: "document", origin: "self" },
+    { id: "sel", path: "b.md", kind: "selection", origin: "unknown", text: "原文", heading: "H" },
+  ]);
+});
+
 
 test("完整会话导出包括选文快照及材料归属", () => {
   const session = newSession([{ id: "sel", path: "原文.md", kind: "selection", origin: "external", text: "原作者的第一句话。\n原作者的第二句话。" }]);
@@ -99,4 +115,108 @@ test("完整会话导出包括选文快照及材料归属", () => {
   expect(markdown).toContain("外部材料");
   expect(markdown).toContain("> 原作者的第一句话。");
   expect(markdown).toContain("> 原作者的第二句话。");
+});
+
+test("另一端的新回答不会被本地旧草稿覆盖，冲突保留为独立会话", async () => {
+  const { adapter, files, store } = fixture(); await store.init();
+  const session = newSession(); session.history.push({ role: "user", content: "原问题" }); await store.save(session);
+  const originalId = session.id;
+  const other = new SessionStore(adapter as unknown as DataAdapter, "plugin/sessions"); await other.init();
+  const local = await other.get(originalId); local.composer = "手机上未发送的问题";
+  session.history.push({ role: "assistant", content: "桌面的新回答" }); await store.save(session);
+  await other.save(local);
+  expect(local.id).not.toBe(originalId);
+  expect(local.title).toContain("同步副本");
+  expect(JSON.parse(files.get(`plugin/sessions/${originalId}.json`)!).history.at(-1).content).toBe("桌面的新回答");
+  expect(JSON.parse(files.get(`plugin/sessions/${local.id}.json`)!).composer).toBe("手机上未发送的问题");
+  expect(other.list()).toHaveLength(2);
+});
+
+test("无本地改动时读取或保存会接续外部更新，不生成冲突副本", async () => {
+  const { adapter, store } = fixture(); await store.init();
+  const session = newSession(); await store.save(session);
+  const other = new SessionStore(adapter as unknown as DataAdapter, "plugin/sessions"); await other.init();
+  const local = await other.get(session.id);
+  session.history.push({ role: "user", content: "另一端的第一问" }); await store.save(session);
+  expect(await other.get(session.id)).toBe(local);
+  expect(local.history).toEqual(session.history);
+  session.history.push({ role: "assistant", content: "新回答" }); await store.save(session);
+  local.updatedAt++;
+  await other.save(local);
+  expect(local.history).toEqual(session.history);
+  expect(other.list()).toHaveLength(1);
+});
+
+test("冲突分流后已经入队的下一次保存继续写本地副本", async () => {
+  const { adapter, files, store } = fixture(); await store.init();
+  const session = newSession(); await store.save(session); const originalId = session.id;
+  const other = new SessionStore(adapter as unknown as DataAdapter, "plugin/sessions"); await other.init();
+  const local = await other.get(originalId); local.composer = "草稿一";
+  session.history.push({ role: "user", content: "外部新问题" }); await store.save(session);
+  const first = other.save(local); local.composer = "草稿二"; const second = other.save(local);
+  await Promise.all([first, second]);
+  expect(other.list()).toHaveLength(2);
+  expect(JSON.parse(files.get(`plugin/sessions/${local.id}.json`)!).composer).toBe("草稿二");
+  expect(JSON.parse(files.get(`plugin/sessions/${originalId}.json`)!).history[0].content).toBe("外部新问题");
+});
+
+test("同时通过版本检查的两个写入可在重启后找回双方的原文", async () => {
+  const { adapter, files, store } = fixture(); await store.init();
+  const a = newSession(); a.history.push({ role: "user", content: "共同问题" }); await store.save(a);
+  const other = new SessionStore(adapter as unknown as DataAdapter, "plugin/sessions"); await other.init();
+  const b = await other.get(a.id);
+  a.history.push({ role: "assistant", content: "设备 A 的回答" });
+  b.history.push({ role: "assistant", content: "设备 B 的回答" });
+  let arrivals = 0, resume!: () => void;
+  const both = new Promise<void>(resolve => { resume = resolve; });
+  const primary = `plugin/sessions/${a.id}.json`;
+  adapter.write.mockImplementation(async (p, text) => {
+    if (p === primary) { if (++arrivals === 2) resume(); await both; }
+    files.set(p, text);
+  });
+  await Promise.all([store.save(a), other.save(b)]);
+  adapter.write.mockImplementation(async (p, text) => { files.set(p, text); });
+  const reloaded = new SessionStore(adapter as unknown as DataAdapter, "plugin/sessions"); await reloaded.init();
+  const histories = await Promise.all(reloaded.list().map(async info => conversationMarkdown(await reloaded.get(info.id))));
+  expect(histories.some(text => text.includes("设备 A 的回答"))).toBe(true);
+  expect(histories.some(text => text.includes("设备 B 的回答"))).toBe(true);
+  expect(reloaded.warnings.some(text => text.includes("恢复快照"))).toBe(true);
+});
+
+test("主文件尚未写入时中断，可从独立快照恢复未发送草稿", async () => {
+  const { adapter, store } = fixture(); await store.init();
+  const session = newSession(); await store.save(session);
+  session.composer = "尚未写进主文件的草稿";
+  const write = adapter.write.getMockImplementation()!;
+  adapter.write.mockImplementation(async (p, text) => {
+    if (p.endsWith(`${session.id}.json.bak`)) throw new Error("write interrupted");
+    await write(p, text);
+  });
+  await expect(store.save(session)).rejects.toThrow("write interrupted");
+  adapter.write.mockImplementation(write);
+  const reloaded = new SessionStore(adapter as unknown as DataAdapter, "plugin/sessions"); await reloaded.init();
+  const sessions = await Promise.all(reloaded.list().map(info => reloaded.get(info.id)));
+  expect(sessions.some(s => s.composer === "尚未写进主文件的草稿")).toBe(true);
+});
+
+test("会话目录合并保留另一端新增的会话，并可刷新发现它", async () => {
+  const { adapter, store } = fixture(); await store.init();
+  const other = new SessionStore(adapter as unknown as DataAdapter, "plugin/sessions"); await other.init();
+  const a = newSession(), b = newSession(); await store.save(a); await other.save(b);
+  await store.refresh();
+  expect(store.list().map(info => info.id)).toEqual(expect.arrayContaining([a.id, b.id]));
+});
+
+test("外部改动或删除之后不覆盖或复活原会话", async () => {
+  const { files, store } = fixture(); await store.init();
+  const session = newSession(); await store.save(session); const originalId = session.id;
+  files.delete(`plugin/sessions/${originalId}.json`);
+  session.composer = "本地仍有草稿";
+  await store.save(session);
+  expect(session.id).not.toBe(originalId);
+  expect(files.has(`plugin/sessions/${originalId}.json`)).toBe(false);
+  const changed = { ...session, history: [{ role: "user", content: "外部修改" }] };
+  files.set(`plugin/sessions/${session.id}.json`, JSON.stringify(changed));
+  await expect(store.delete(session.id)).rejects.toThrow("其它设备更新");
+  expect(files.has(`plugin/sessions/${session.id}.json`)).toBe(true);
 });

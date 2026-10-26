@@ -55,7 +55,7 @@ export class ChatView extends ItemView {
   getIcon(): string { return "brain"; }
   getState(): Record<string, unknown> { return { sessionId: this.sessionId }; }
   async setState(state: unknown, result: ViewStateResult): Promise<void> {
-    const id = state && typeof state === "object" && "sessionId" in state ? (state as { sessionId: unknown }).sessionId : null;
+    const id = state && typeof state === "object" && "sessionId" in state ? state.sessionId : null;
     const session = typeof id === "string" && this.plugin.sessions.has(id)
       ? await this.plugin.sessions.get(id) : await this.plugin.initialSession(this.viewType);
     await this.openSession(session);
@@ -146,6 +146,15 @@ export class ChatView extends ItemView {
     this.materialBtn.title = `${materials.map(m => m.path).join("\n") || "添加文档，无需索引"}\n点击管理本会话范围`;
     this.materialBtn.setAttribute("aria-label", `管理讨论范围，${label}`);
   }
+  async refreshStoredSession(): Promise<void> {
+    if (this.closed || !this.session) return;
+    this.refreshSessionHeader();
+    if (this.busy || this.sending) return;
+    const top = this.messagesEl.scrollTop, following = this.following;
+    this.inputEl.value = this.session.composer; this.autoGrow();
+    await this.renderHistory();
+    if (following) this.scrollToBottom(); else this.messagesEl.scrollTop = top;
+  }
   private editMaterials(): void {
     if (!this.session || this.busy || this.sending) return;
     new MaterialModal(this.app, this.plugin, this.session, () => {
@@ -197,8 +206,10 @@ export class ChatView extends ItemView {
     menu.showAtMouseEvent(event);
   }
   private autoGrow(): void {
-    this.inputEl.style.height = "auto";
-    this.inputEl.style.height = `${this.inputEl.scrollHeight + 2}px`;
+    this.inputEl.addClass("cobrain-input-measuring");
+    const height = this.inputEl.scrollHeight + 2;
+    this.inputEl.removeClass("cobrain-input-measuring");
+    this.inputEl.setCssProps({ "--cobrain-input-height": `${height}px` });
   }
   private setStatus(text: string): void {
     if (this.closed) return;

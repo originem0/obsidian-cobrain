@@ -43,7 +43,8 @@ export default class CobrainPlugin extends Plugin {
   async onload(): Promise<void> {
     await this.loadSettings();
     const base = this.manifest.dir ?? `${this.app.vault.configDir}/plugins/${this.manifest.id}`;
-    this.sessions = new SessionStore(this.app.vault.adapter, `${base}/sessions`, message => new Notice(message, 10000));
+    this.sessions = new SessionStore(this.app.vault.adapter, `${base}/sessions`, message => new Notice(message, 10000),
+      (session, previousId) => this.sessionChanged(session, previousId));
     await this.sessions.init();
     if (!this.sessionsMigrated) {
       for (const session of migrateLegacyDrafts(this.legacyDrafts)) {
@@ -131,7 +132,7 @@ export default class CobrainPlugin extends Plugin {
   }
 
   async loadSettings(): Promise<void> {
-    const data = await this.loadData();
+    const data: unknown = await this.loadData();
     const normalized = normalizeSettingsData(data);
     this.settings = normalized.settings;
     this.legacyDataIndex = normalized.legacyIndex;
@@ -180,7 +181,28 @@ export default class CobrainPlugin extends Plugin {
     if (this.sessionRequests.has(id)) return null;
     const token = Symbol(id);
     this.sessionRequests.set(id, token);
-    return () => { if (this.sessionRequests.get(id) === token) this.sessionRequests.delete(id); };
+    return () => {
+      // 同步冲突会把活的会话分流到新 ID，请求锁跟随它直到这一轮真正结束。
+      for (const [currentId, currentToken] of this.sessionRequests) if (currentToken === token) this.sessionRequests.delete(currentId);
+    };
+  }
+  private sessionChanged(session: ChatSession, previousId: string): void {
+    if (session.id !== previousId) {
+      const token = this.sessionRequests.get(previousId);
+      if (token) { this.sessionRequests.delete(previousId); this.sessionRequests.set(session.id, token); }
+      const pending = this.sessionTimers.get(previousId);
+      if (pending?.session === session) { window.clearTimeout(pending.timer); this.sessionTimers.delete(previousId); }
+      if (this.lastSessionId === previousId) {
+        this.lastSessionId = session.id;
+        void this.saveSettings().catch(e => this.reportError(e));
+      }
+    }
+    for (const view of this.chatViews()) {
+      if (view.sessionId !== session.id) continue;
+      if (session.id !== previousId) view.refreshSessionHeader();
+      else void view.refreshStoredSession().catch(e => this.reportError(e));
+    }
+    void Promise.resolve(this.app.workspace.requestSaveLayout()).catch(e => this.reportError(e));
   }
   async persistSession(session: ChatSession, immediate = true): Promise<void> {
     session.updatedAt = Date.now();
@@ -192,8 +214,9 @@ export default class CobrainPlugin extends Plugin {
     if (pending) { window.clearTimeout(pending.timer); this.sessionTimers.delete(session.id); }
     if (immediate) await this.sessions.save(session);
     else {
+      const id = session.id;
       const timer = window.setTimeout(() => {
-        this.sessionTimers.delete(session.id);
+        this.sessionTimers.delete(id);
         void this.sessions.save(session).catch(e => this.reportError(e));
       }, 450);
       this.sessionTimers.set(session.id, { timer, session });
@@ -443,12 +466,9 @@ class IndexStatusModal extends Modal {
       return;
     }
     for (const f of this.status.failures.slice(0, 10)) {
-      const row = contentEl.createDiv();
-      row.setCssStyles({ margin: "0 0 10px" });
-      row.createEl("div", { text: `${new Date(f.at).toLocaleString()} · ${f.path}` })
-        .setCssStyles({ fontWeight: "600" });
-      row.createEl("div", { text: f.message })
-        .setCssStyles({ color: "var(--text-muted)", fontSize: "0.85em" });
+      const row = contentEl.createDiv({ cls: "cobrain-index-failure" });
+      row.createDiv({ text: `${new Date(f.at).toLocaleString()} · ${f.path}`, cls: "cobrain-index-failure-title" });
+      row.createDiv({ text: f.message, cls: "cobrain-index-failure-message" });
     }
   }
 

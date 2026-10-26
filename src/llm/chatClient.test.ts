@@ -7,6 +7,8 @@ import { ChatClient, parseChatResponse } from "./chatClient";
 import type { CobrainSettings } from "../settings";
 import type { ChatMsg } from "./chatClient";
 
+(globalThis as unknown as { window: typeof globalThis }).window = globalThis;
+
 const settings = { llmBaseUrl: "https://chat.example/v1", llmKey: "k", llmModel: "m" } as CobrainSettings;
 const msgs: ChatMsg[] = [{ role: "user", content: "hi" }];
 
@@ -154,4 +156,31 @@ test("流跑完但没有任何内容按空内容报错", async () => {
 
   await expect(client.chat(msgs, { onDelta: () => undefined })).rejects.toThrow("聊天 API 返回空内容");
   expect(requestUrl).not.toHaveBeenCalled();
+});
+
+test.each([401, 403, 404, 429, 500, 503])("流式 HTTP %s 不降级重发", async status => {
+  const fetchImpl = jest.fn(async () => jsonResponse({ error: "stream unsupported" }, status));
+  await expect(new ChatClient(settings, fetchImpl as unknown as typeof fetch).chat(msgs, { onDelta: () => undefined })).rejects.toThrow(`聊天 API ${status}`);
+  expect(fetchImpl).toHaveBeenCalledTimes(1);
+});
+
+test("普通参数错误不会因请求使用流式而重试", async () => {
+  const fetchImpl = jest.fn(async () => jsonResponse({ error: "invalid model" }, 400));
+  await expect(new ChatClient(settings, fetchImpl as unknown as typeof fetch).chat(msgs, { onDelta: () => undefined })).rejects.toThrow("400");
+  expect(fetchImpl).toHaveBeenCalledTimes(1);
+});
+
+test("DONE 是完成信号，不读取之后的数据，并释放流资源", async () => {
+  const read = jest.fn().mockResolvedValueOnce({ done: false, value: new TextEncoder().encode(
+    'data: {"choices":[{"delta":{"content":"完整回答"}}]}\n\ndata: [DONE]\n\ndata: {"choices":[{"delta":{"content":"多余内容"}}]}\n\n',
+  ) }).mockRejectedValue(new Error("DONE 后断开"));
+  const cancel = jest.fn(async () => { throw new Error("已关闭"); });
+  const releaseLock = jest.fn();
+  const fetchImpl = jest.fn(async () => ({ status: 200, headers: { get: () => "text/event-stream" }, body: { getReader: () => ({ read, cancel, releaseLock }) } }));
+  const deltas: string[] = [];
+  await expect(new ChatClient(settings, fetchImpl as unknown as typeof fetch).chat(msgs, { onDelta: t => deltas.push(t) })).resolves.toBe("完整回答");
+  expect(deltas).toEqual(["完整回答"]);
+  expect(read).toHaveBeenCalledTimes(1);
+  expect(cancel).toHaveBeenCalledTimes(1);
+  expect(releaseLock).toHaveBeenCalledTimes(1);
 });

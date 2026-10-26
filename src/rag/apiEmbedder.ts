@@ -22,19 +22,20 @@ export function parseEmbeddingResponse(json: unknown, expectedCount: number): nu
   if (!json || typeof json !== "object" || !("data" in json) || !Array.isArray(json.data)) {
     throw new Error("嵌入 API 返回格式异常：缺少 data 数组");
   }
-  if (json.data.length !== expectedCount) {
-    throw new Error(`嵌入 API 返回数量不匹配：请求 ${expectedCount}，返回 ${json.data.length}`);
+  const data: unknown[] = json.data;
+  if (data.length !== expectedCount) {
+    throw new Error(`嵌入 API 返回数量不匹配：请求 ${expectedCount}，返回 ${data.length}`);
   }
   // 先抽出每项 embedding，并记录是否带数字 index。
   // OpenAI 规范每项带 index，但不少「兼容」端点(LM Studio / 部分自建 shim)按数组顺序返回、不带 index。
   // 策略：全带 index → 按 index 排序；全不带 → 按数组顺序；半带半不带 → 无法可靠对齐，报错。
   const items: Array<{ embedding: number[]; index: number | null }> = [];
   let withIndex = 0;
-  for (const item of json.data) {
+  for (const item of data) {
     if (!item || typeof item !== "object" || !("embedding" in item) || !Array.isArray(item.embedding)) {
       throw new Error("嵌入 API 返回格式异常：data 项缺少 embedding");
     }
-    const embedding = item.embedding as unknown[];
+    const embedding: unknown[] = item.embedding;
     if (!embedding.length || embedding.some(v => typeof v !== "number" || !Number.isFinite(v))) {
       throw new Error("嵌入 API 返回向量包含非有限数值");
     }

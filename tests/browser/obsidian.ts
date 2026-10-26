@@ -17,6 +17,7 @@ Object.assign(HTMLElement.prototype, {
   removeClass(...names: string[]) { this.classList.remove(...names); },
   setText(text: string) { this.textContent = text; },
   setCssStyles(styles: any) { Object.assign(this.style, styles); },
+  setCssProps(props: Record<string, string>) { for (const [key, value] of Object.entries(props)) this.style.setProperty(key, value); },
 });
 export class Component {
   children: Component[] = [];
@@ -109,6 +110,7 @@ export const requestUrl = () => { throw new Error("Unexpected network request");
 export class Notice {
   static messages: string[] = [];
   constructor(text: string) { Notice.messages.push(text); }
+  hide() {}
 }
 export const MarkdownRenderer = { async render(_app: any, text: string, el: HTMLElement) { el.textContent = text; el.style.whiteSpace = "pre-wrap"; } };
 export class Modal {

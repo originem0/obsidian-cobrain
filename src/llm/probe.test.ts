@@ -4,7 +4,7 @@ jest.mock("obsidian", () => ({
 
 import { requestUrl } from "obsidian";
 import { classifyModels, ensureCurrentOption } from "./modelClassifier";
-import { testChat } from "./probe";
+import { detectEmbeddingModels, listModels, testChat } from "./probe";
 
 // withTimeout 用 window.setTimeout；node 测试环境无 window，指到 globalThis 上。
 (globalThis as unknown as { window: typeof globalThis }).window = globalThis;
@@ -62,4 +62,23 @@ test("testChat：非 200 判为不可用", async () => {
   mockRequestUrl.mockResolvedValue({ status: 401, json: {}, text: "unauthorized" } as never);
   const r = await testChat("https://x/v1", "k", "m");
   expect(r.ok).toBe(false);
+});
+
+test("listModels 只保留非空字符串 id；返回体没有模型数组时报错", async () => {
+  mockRequestUrl.mockResolvedValueOnce({ status: 200, json: { data: [{ id: "a" }, { id: "" }, { id: 3 }, { name: "x" }, null, "b"] } } as never);
+  await expect(listModels("https://x/v1", "k")).resolves.toEqual(["a"]);
+  mockRequestUrl.mockResolvedValueOnce({ status: 200, json: { models: [{ id: "a" }] } } as never);
+  await expect(listModels("https://x/v1", "k")).rejects.toThrow("没有模型数组");
+});
+
+test("detectEmbeddingModels 只保留真实返回向量的嵌入模型并附带维度", async () => {
+  mockRequestUrl.mockImplementation((async (req: { url: string; body?: string }) => {
+    if (req.url.endsWith("/models")) return { status: 200, json: { data: [{ id: "text-embedding-3-small" }, { id: "bge-m3" }, { id: "gpt-4o" }] } };
+    const model = (JSON.parse(req.body ?? "{}") as { model?: string }).model;
+    return model === "text-embedding-3-small"
+      ? { status: 200, json: { data: [{ embedding: [0.1, 0.2, 0.3] }] } }
+      : { status: 200, json: { data: [{}] } };
+  }) as never);
+  await expect(detectEmbeddingModels("https://x/v1", "k")).resolves.toEqual([{ id: "text-embedding-3-small", dim: 3 }]);
+  mockRequestUrl.mockReset();
 });

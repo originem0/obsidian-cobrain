@@ -1,8 +1,20 @@
 # Cobrain · 文本副脑
 
-An Obsidian conversation partner for thinking deeply about documents you choose. Desktop and mobile, without automatic vault-wide search.
+## English
 
-当前版本 **0.6.1**。安装文件见 [GitHub Release](https://github.com/originem0/obsidian-cobrain/releases/tag/0.6.1)，本版修复设置页展开后的滚动与窄屏布局，并更新默认提示词。
+Cobrain is a text-only thinking partner for documents you choose. Open a note and start a conversation, and that note becomes the conversation's material; select a passage to discuss an exact excerpt instead. Switching notes never silently changes the scope of an existing conversation, and ordinary conversations never search your whole vault or call an embedding endpoint.
+
+- **Document-focused conversations.** Each conversation keeps its own materials, full history and unsent draft in separate files, so you can return to any earlier discussion. Before older messages leave the model's context, they are summarized; the complete history stays available for review and export.
+- **Clear attribution.** Materials can be marked as your own notes, external material or AI-generated text, so the model keeps the original author's claims, your judgements and its own suggestions apart.
+- **Reviewable output.** Drafting a note shows an editable title and body before anything is written to the vault. Exporting a conversation keeps every question and answer verbatim. Concept maps and a critique pass are available on demand.
+- **Optional manual retrieval.** An opt-in index covers only folders you allow. It is searched only when you ask, and results join the conversation only after you pick them.
+- **Desktop and mobile.** Document conversations work on both without an index; mobile reads an index built on desktop.
+
+Cobrain requires Obsidian 1.7.2 or later and an OpenAI-compatible chat endpoint: a base URL, an API key and a model name, which you can type directly. The documents, excerpts and conversation context you attach are sent to the endpoint you configure. API keys are stored in plain text in the plugin's data file inside your vault, so syncing the plugin folder also syncs them. The interface and the rest of this guide are in Chinese.
+
+## 简介
+
+当前版本 **0.6.2**。安装文件见 [GitHub Release](https://github.com/originem0/obsidian-cobrain/releases/tag/0.6.2)，本版修正社区目录审核问题，避免跨设备会话互相覆盖，并允许直接填写模型名称。
 
 Cobrain 围绕你明确选择的文档、选文和问题展开讨论。默认只需要一个文本模型；普通对话不建立索引、不检索全库、不调用嵌入端点。
 
@@ -24,6 +36,7 @@ Cobrain 围绕你明确选择的文档、选文和问题展开讨论。默认只
 - 模型上下文按估算容量组织，默认输入预算为 24000 token，可在高级设置中调整。它是插件预算，不是对模型实际容量的检测。
 - 超出预算时，先完成较早消息的连续摘要，再发送近期原文。摘要失败时停止本轮，不会漏掉一段旧消息继续回答。摘要是有损压缩，完整原文仍可在历史和导出中查看。
 - 停止回答或切换会话会保留已经输出的部分。请求失败可以继续回答，不重复插入原问题。
+- 其它设备更新了同一会话、本地又有未保存的改动时，本地内容另存为「· 同步副本」，不覆盖对方；两台设备同时写入时，被覆盖的一方在重启后恢复为「· 恢复副本」。多余的副本可以手动删除。
 
 ## 观点归属
 
@@ -66,14 +79,14 @@ Cobrain 围绕你明确选择的文档、选文和问题展开讨论。默认只
 
 ## 安装与配置
 
-需要 Obsidian 1.5.7 或更高版本。
+需要 Obsidian 1.7.2 或更高版本。
 
 ```sh
 npm install
 npm run build
 ```
 
-从 Release 下载 `cobrain-0.6.1.zip`，或分别下载 `main.js`、`manifest.json`、`styles.css`。将这三个文件复制到 `<vault>/.obsidian/plugins/cobrain/`，启用插件，配置文本端点、API Key 和模型。升级只替换这三个文件，保留 `data.json`、`sessions/` 和 `index/`。无需配置图像或嵌入端点即可开始文档对话。
+从 Release 下载 `cobrain-0.6.2.zip`，或分别下载 `main.js`、`manifest.json`、`styles.css`。将这三个文件复制到 `<vault>/.obsidian/plugins/cobrain/`，启用插件，配置文本端点、API Key 和模型。模型名称可以直接填写，「检测」只是辅助，端点不提供 `/models` 也能使用。升级只替换这三个文件，保留 `data.json`、`sessions/` 和 `index/`。无需配置图像或嵌入端点即可开始文档对话。
 
 已有安装升级后请重新加载插件；移动端需要重启 Obsidian 才会加载同步来的代码。旧版草稿自动迁移，旧数据保留为迁移备份。以前已经被旧版截掉的原文无法从摘要还原。原样默认提示词会更新，自定义提示词保留。
 
@@ -81,16 +94,20 @@ npm run build
 
 ## 数据边界
 
-明确附加的文档、选文和对话上下文发往你配置的文本端点。仅启用可选索引时，允许范围内的笔记才会分块发送给嵌入端点。密钥保存在本地插件数据中，会话保存在 `sessions/`，索引保存在 `index/`；如果同步插件目录，这些数据会随同步工具同步。
+明确附加的文档、选文和对话上下文发往你配置的文本端点。仅启用可选索引时，允许范围内的笔记才会分块发送给嵌入端点。API Key 以明文保存在库内的插件数据 `data.json` 中，会话保存在 `sessions/`，索引保存在 `index/`；如果同步插件目录，这些数据（包括密钥）会随同步工具同步。
 
 ## 验证
 
 ```sh
 npm test -- --runInBand
 npm run build
+npm run lint
+npm run check:plugin
 npm run test:ui
 ```
 
+`npm run lint` 使用社区目录自动审核的同一套规则（eslint-plugin-obsidianmd），有意保留的警告及原因写在 `eslint.config.mjs` 中，新增警告会让检查失败。`npm run check:plugin` 检查版本号、最低版本映射、依赖锁定和英文说明。
+
 浏览器验证复用项目已有的 esbuild 和本机 Chrome/Edge，不下载依赖。可用 `COBRAIN_CHROME` 指定浏览器路径。它运行实际的对话界面、设置页、会话存储和上下文逻辑；设置页检查九个面板全部展开后的滚轮移动、底部控件可见与窄屏控件边界。Obsidian 宿主用浏览器适配层模拟，不访问真实笔记或模型接口，不替代真实宿主、手机或模型效果验收。截图和报告输出到已忽略的 `.audit/ui/`。
 
-详见[文档目录](docs/README.md)、[使用手册](docs/使用手册.md)、[实践演练](docs/实践演练.md)、[提示词与设置页审查](docs/提示词与设置页审查.md)和[0.6.1 改动说明](docs/0.6.1-change-notes.md)。旧演练和 `docs/superpowers/` 保留为历史记录，并注明当前入口。
+详见[文档目录](docs/README.md)、[使用手册](docs/使用手册.md)、[实践演练](docs/实践演练.md)、[提示词与设置页审查](docs/提示词与设置页审查.md)和[0.6.2 改动说明](docs/0.6.2-change-notes.md)。旧演练和 `docs/superpowers/` 保留为历史记录，并注明当前入口。

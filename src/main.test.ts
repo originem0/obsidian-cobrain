@@ -35,10 +35,12 @@ async function fixture(data: unknown = {}) {
       on: (name: string, cb: (...args: any[]) => unknown) => { events[name] = cb; return {}; },
       onLayoutReady: (cb: () => void) => cb(), detachLeavesOfType: jest.fn(), getActiveFile: () => active,
       iterateAllLeaves: (cb: (leaf: any) => void) => leaves.forEach(cb), revealLeaf: jest.fn(async () => undefined),
+      requestSaveLayout: jest.fn(),
       getRightLeaf: jest.fn(() => {
         const leaf: any = { app, view: null, setViewState: jest.fn(async () => {
           leaf.view = new ChatView(leaf, plugin);
           leaf.view.openSession = async (session: unknown) => { leaf.view.session = session; };
+          leaf.view.refreshStoredSession = jest.fn(async () => undefined);
         }) };
         leaves.push(leaf); return leaf;
       }),
@@ -55,6 +57,26 @@ test("普通启动和新建会话不加载向量索引", async () => {
   const { plugin } = await fixture(); await plugin.createSession();
   expect(load).not.toHaveBeenCalled();
   expect(plugin.settings.indexEnabled).toBe(false);
+});
+
+test("冲突分流后请求锁和当前会话仍跟随本地副本", async () => {
+  const { plugin, files, leaves, app } = await fixture();
+  await plugin.openNewChatView();
+  const view = leaves[0].view, session = view.session;
+  const id = session.id;
+  await plugin.rememberSession(id);
+  const release = plugin.acquireSessionRequest(id)!;
+  session.composer = "本地草稿";
+  files.set(`.obsidian/plugins/cobrain/sessions/${id}.json`, JSON.stringify({ ...session, composer: "", history: [{ role: "user", content: "外部问题" }] }));
+  await plugin.persistSession(session);
+  expect(view.sessionId).toBe(session.id);
+  expect(session.id).not.toBe(id);
+  expect(plugin.acquireSessionRequest(session.id)).toBeNull();
+  release();
+  expect(plugin.acquireSessionRequest(session.id)).not.toBeNull();
+  await plugin.saveSettings();
+  expect((plugin.saveData as jest.Mock).mock.calls.at(-1)[0].lastSessionId).toBe(session.id);
+  expect(app.workspace.requestSaveLayout).toHaveBeenCalled();
 });
 test("桌面可以新开超过三个独立会话和面板", async () => {
   const { plugin, leaves } = await fixture();

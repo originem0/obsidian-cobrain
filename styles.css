@@ -1,5 +1,19 @@
 /* 安静的阅读界面。继承 Obsidian 字体和主题，不加载外部资源。 */
-.cobrain-settings { padding-bottom: max(24px, var(--keyboard-height, 0px), env(safe-area-inset-bottom, 0px)); }
+.cobrain-settings { display: block; height: 100%; min-height: 0; overflow-y: auto; overflow-x: hidden; padding-bottom: max(24px, var(--keyboard-height, 0px), env(safe-area-inset-bottom, 0px)); }
+/* 宿主可能把设置页设为裁切内容的 flex 容器；由插件页承担滚动。 */
+.vertical-tab-content-container > .vertical-tab-content.cobrain-settings { display: block; overflow-y: auto; overflow-x: hidden; }
+.cobrain-settings-section { margin: 0 0 10px; padding: 0; border: 1px solid var(--background-modifier-border); border-radius: 6px; background: var(--background-primary); }
+.cobrain-settings-section > summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; cursor: pointer; padding: 10px 12px; font-weight: 600; }
+.cobrain-settings-section-body { padding: 0 12px 12px; }
+.cobrain-endpoint-status { font-size: 0.82em; font-weight: 500; color: var(--text-muted); white-space: nowrap; }
+.cobrain-endpoint-status.is-ok { color: var(--text-success); }
+.cobrain-endpoint-status.is-fail { color: var(--text-error); }
+.cobrain-endpoint-warning { font-size: 0.85em; margin: 4px 0 10px; padding: 6px 10px; line-height: 1.5; border-left: 3px solid var(--text-error); background: var(--background-secondary); border-radius: 4px; }
+.cobrain-prompt-description { font-size: 0.85em; color: var(--text-muted); margin: 4px 0 12px; line-height: 1.5; }
+.cobrain-setting-textarea { width: 100%; resize: vertical; }
+.cobrain-index-failure { margin: 0 0 10px; }
+.cobrain-index-failure-title { font-weight: 600; }
+.cobrain-index-failure-message { color: var(--text-muted); font-size: 0.85em; }
 .cobrain-settings .setting-item-control { min-width: 0; flex-wrap: wrap; }
 .cobrain-settings input, .cobrain-settings select, .cobrain-settings textarea { box-sizing: border-box; min-width: 0; max-width: 100%; }
 .cobrain-settings .cobrain-prompt-setting { flex-direction: column; align-items: stretch; }
@@ -127,6 +141,7 @@
   display: block;
   flex: 1 1 0;
   width: 0;
+  height: var(--cobrain-input-height, auto);
   min-width: 0;
   min-height: 44px;
   max-height: min(28vh, 220px);
@@ -143,6 +158,7 @@
   background: var(--background-secondary);
   color: var(--text-normal);
 }
+.cobrain-root .cobrain-input.cobrain-input-measuring { height: auto; }
 .cobrain-root .cobrain-input:focus { border-color: var(--interactive-accent); }
 .cobrain-root .cobrain-send { flex: 0 0 auto; min-width: 58px; height: 44px; margin: 0; padding: 0 14px; border-radius: 8px; cursor: pointer; }
 .cobrain-root .cobrain-load-older { display: block; width: 100%; margin: 0 0 18px; border: none; box-shadow: none; background: transparent; color: var(--text-muted); font-size: 0.8em; cursor: pointer; min-height: 40px; }

@@ -23,10 +23,15 @@ jobs:
           node-version: "20"
           cache: "npm"
 
-      # 用 npm install 而非 npm ci：本仓库版本号手动 bump，lockfile 的 version 常与 package.json 不同步，
-      # npm ci 会因此失败；构建只需 devDeps，install 足够且稳健。
       - name: Install dependencies
-        run: npm install --no-audit --no-fund
+        run: npm ci --no-audit --no-fund
+
+      - name: Check plugin requirements
+        run: npm run check:plugin
+
+      # 与社区目录自动审核同一套规则：错误或新增警告都会阻止发版，避免发布后被移出搜索。
+      - name: Lint with the directory review rules
+        run: npm run lint
 
       - name: Verify tag matches manifest version
         run: |

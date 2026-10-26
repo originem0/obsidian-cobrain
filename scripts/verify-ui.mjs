@@ -80,6 +80,7 @@ try {
     await new Promise(r => setTimeout(r, 100));
   }
   const checks = await evaluate("window.runTests()");
+  const settingsChecks = await evaluate("window.runSettingsTests()");
   await evaluate("window.seedScreenshot()");
   const layouts = [];
   for (const size of [
@@ -119,7 +120,7 @@ try {
     await evaluate("window.closeSettingsTest()");
   }
   if (exceptions.length) throw new Error(`Browser exceptions: ${JSON.stringify(exceptions)}`);
-  const report = { checks, layouts, settingsLayouts, note: "Actual view/settings/store/Tutor in a browser-only Obsidian host adapter; device sizes and reduced keyboard viewport are emulated, not a physical phone." };
+  const report = { checks, settingsChecks, layouts, settingsLayouts, note: "Actual view/settings/store/Tutor in a browser-only Obsidian host adapter; device sizes and reduced keyboard viewport are emulated, not a physical phone." };
   await writeFile(path.join(output, "report.json"), JSON.stringify(report, null, 2));
   console.log(JSON.stringify(report, null, 2));
   await send("Browser.close").catch(() => {});

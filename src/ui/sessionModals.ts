@@ -6,6 +6,11 @@ export class SessionPicker extends FuzzySuggestModal<SessionInfo> {
   constructor(app: App, private plugin: CobrainPlugin, private choose: (id: string) => void) {
     super(app); this.setPlaceholder("搜索历史会话…");
   }
+  async onOpen(): Promise<void> {
+    try { await this.plugin.sessions.refresh(); }
+    catch (e) { this.plugin.reportError(e); }
+    await super.onOpen();
+  }
   getItems(): SessionInfo[] { return this.plugin.sessions.list(); }
   getItemText(item: SessionInfo): string { return `${item.title} · ${new Date(item.updatedAt).toLocaleDateString()}`; }
   onChooseItem(item: SessionInfo): void { this.choose(item.id); }

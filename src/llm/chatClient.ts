@@ -22,7 +22,7 @@ export interface ChatCallOpts {
 
 // 端点已应答但状态码非 200。区别于网络层 TypeError：这类错误换传输方式（requestUrl）重试也没用。
 export class HttpError extends Error {
-  constructor(public status: number, bodyText: string) {
+  constructor(public status: number, public bodyText: string) {
     super(`聊天 API ${status}：${bodyText.slice(0, 200)}`);
   }
 }
@@ -30,11 +30,10 @@ export class HttpError extends Error {
 // 解析 OpenAI 兼容 /chat/completions 响应，取 choices[0].message.content。
 // 抽成纯函数便于单测；缺字段抛「格式异常」，内容为空(如推理模型把预算耗在 reasoning 上、content 空)抛「空内容」。
 export function parseChatResponse(json: unknown): string {
-  const content =
-    json && typeof json === "object" && "choices" in json && Array.isArray(json.choices) && json.choices[0]
-      && typeof json.choices[0] === "object" && "message" in json.choices[0]
-      && json.choices[0].message && typeof json.choices[0].message === "object" && "content" in json.choices[0].message
-      ? json.choices[0].message.content : undefined;
+  const choices = json && typeof json === "object" ? (json as Record<string, unknown>).choices : undefined;
+  const choice: unknown = Array.isArray(choices) ? choices[0] : undefined;
+  const message = choice && typeof choice === "object" ? (choice as Record<string, unknown>).message : undefined;
+  const content = message && typeof message === "object" ? (message as Record<string, unknown>).content : undefined;
   if (typeof content !== "string") throw new Error("聊天 API 返回格式异常");
   if (!content.trim()) throw new Error("聊天 API 返回空内容");
   return content;
@@ -94,8 +93,11 @@ export class ChatClient {
     try {
       return await this.fetchOnce(messages, opts, !!onDelta, onDelta);
     } catch (e) {
-      // 个别代理不认 stream 参数直接 4xx：降一次非流式再试；仍失败则把该错误抛给上层。
-      if (onDelta && e instanceof HttpError && !opts.signal?.aborted) {
+      // 只有明确拒绝 stream 的参数错误才降级，认证、限流和服务错误不能靠重发解决。
+      if (onDelta && e instanceof HttpError && [400, 422].includes(e.status)
+        && /\bstream(?:ing)?\b/i.test(e.bodyText)
+        && /unsupported|not supported|not support|does not support|not allowed|unknown|unrecognized|invalid|不支持|不允许/i.test(e.bodyText)
+        && !opts.signal?.aborted) {
         return await this.fetchOnce(messages, opts, false, undefined);
       }
       throw e;
@@ -108,12 +110,12 @@ export class ChatClient {
     const onOuterAbort = () => ctrl.abort();
     if (opts.signal?.aborted) ctrl.abort();
     opts.signal?.addEventListener("abort", onOuterAbort, { once: true });
-    let idleTimer: ReturnType<typeof setTimeout> | undefined;
+    let idleTimer: number | undefined;
     let idleTimedOut = false;
     // 每收到一个数据块重置：连接/首包/相邻增量任何一段超过 CHAT_TIMEOUT_MS 判为断流
     const armIdle = () => {
-      if (idleTimer !== undefined) clearTimeout(idleTimer);
-      idleTimer = setTimeout(() => { idleTimedOut = true; ctrl.abort(); }, CHAT_TIMEOUT_MS);
+      if (idleTimer !== undefined) window.clearTimeout(idleTimer);
+      idleTimer = window.setTimeout(() => { idleTimedOut = true; ctrl.abort(); }, CHAT_TIMEOUT_MS);
     };
     try {
       armIdle();
@@ -136,29 +138,38 @@ export class ChatClient {
       const decoder = new TextDecoder();
       const buf = new SseLineBuffer();
       let acc = "";
+      let complete = false;
       const consume = (payloads: string[]) => {
         for (const payload of payloads) {
-          if (payload === "[DONE]") continue;
+          if (payload === "[DONE]") { complete = true; break; }
           let piece = "";
           try { piece = extractStreamDelta(JSON.parse(payload)); } catch { /* 心跳/非 JSON 行忽略 */ }
           if (piece) { acc += piece; onDelta?.(piece); }
         }
       };
-      for (;;) {
-        armIdle();
-        const { done, value } = await reader.read();
-        if (done) break;
-        consume(buf.feed(decoder.decode(value, { stream: true })));
+      try {
+        while (!complete) {
+          armIdle();
+          const { done, value } = await reader.read();
+          if (done) break;
+          consume(buf.feed(decoder.decode(value, { stream: true })));
+        }
+        if (!complete) {
+          consume(buf.feed(decoder.decode()));
+          consume(buf.flush());
+        }
+      } finally {
+        // 协议结束后无需等待代理关连接；清理失败不能把完整回答变成请求失败。
+        void reader.cancel?.().catch(() => undefined);
+        reader.releaseLock?.();
       }
-      consume(buf.feed(decoder.decode()));
-      consume(buf.flush());
       if (!acc.trim()) throw new Error("聊天 API 返回空内容");
       return acc;
     } catch (e) {
       if (idleTimedOut) throw new Error(`聊天 API超时（约 ${Math.round(CHAT_TIMEOUT_MS / 1000)} 秒无响应）`);
       throw e;
     } finally {
-      if (idleTimer !== undefined) clearTimeout(idleTimer);
+      if (idleTimer !== undefined) window.clearTimeout(idleTimer);
       opts.signal?.removeEventListener("abort", onOuterAbort);
     }
   }

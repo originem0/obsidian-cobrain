@@ -69,3 +69,26 @@ test("IndexStore 桌面端从 data.json.index 写出分片后回调删除旧字�
   expect(adapter.write.mock.calls.some((call: unknown[]) => String(call[0]).endsWith("meta.json"))).toBe(true);
   expect(migrated).toHaveBeenCalledTimes(1);
 });
+
+test("IndexStore 跳过缺少路径的残缺分片，其余分片照常加载", async () => {
+  const dir = ".obsidian/plugins/cobrain/index";
+  const files: Record<string, string> = {
+    [`${dir}/meta.json`]: JSON.stringify({ embedModel: "embed-x" }),
+    [`${dir}/a.json`]: JSON.stringify({ path: "a.md", mtime: 1, hash: "h", entries: [{ chunkIdx: 0, text: "猫", heading: "", vector: [1, 0] }] }),
+    [`${dir}/broken.json`]: JSON.stringify({ entries: [{ chunkIdx: 0, text: "狗", heading: "", vector: [0, 1] }] }),
+  };
+  const adapter = {
+    exists: jest.fn(async (p: string) => p === dir || p in files),
+    list: jest.fn(async () => ({ files: Object.keys(files), folders: [] })),
+    read: jest.fn(async (p: string) => files[p]),
+    write: jest.fn(), mkdir: jest.fn(), remove: jest.fn(), rmdir: jest.fn(),
+  };
+  const errors = jest.spyOn(console, "error").mockImplementation(() => undefined);
+  const store = new VectorStore();
+  const model = await new IndexStore(mockApp(adapter), { id: "cobrain", dir: ".obsidian/plugins/cobrain" } as any, store, true).load();
+  expect(model).toBe("embed-x");
+  expect(store.allPaths()).toEqual(["a.md"]);
+  expect(store.entryCount()).toBe(1);
+  expect(errors).toHaveBeenCalledWith("Cobrain: 分片缺少路径", `${dir}/broken.json`);
+  errors.mockRestore();
+});

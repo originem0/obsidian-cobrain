@@ -81,7 +81,7 @@ export class VectorStore {
     }
     // int8 点积打分：dotQuantized 与「先反量化再点积」等价，故 minScore 仍可直接比较。
     const big = entries.length > QUERY_YIELD_THRESHOLD;
-    const scored: { e: Entry; score: number }[] = new Array(entries.length);
+    const scored = new Array<{ e: Entry; score: number }>(entries.length);
     for (let i = 0; i < entries.length; i++) {
       const e = entries[i];
       scored[i] = { e, score: dotQuantized(vector, e.q, e.scale) };

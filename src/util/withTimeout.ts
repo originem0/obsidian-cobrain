@@ -11,5 +11,5 @@ export function withTimeout<T>(p: Promise<T>, ms: number, label = "请求"): Pro
   });
   return Promise.race([p, timeout]).finally(() => {
     if (timer) window.clearTimeout(timer);
-  }) as Promise<T>;
+  });
 }

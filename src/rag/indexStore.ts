@@ -50,8 +50,13 @@ export class IndexStore {
       );
       for (const c of contents) {
         if (!c) continue;
-        try { this.store.deserializeFile(JSON.parse(c.txt)); }
-        catch (e) { console.error("Cobrain: 分片解析失败", c.f, e); }
+        try {
+          const parsed: unknown = JSON.parse(c.txt);
+          // 同步冲突可能留下残缺分片；缺少路径时跳过，避免条目挂到无效路径上。
+          if (parsed && typeof parsed === "object" && "path" in parsed && typeof parsed.path === "string") {
+            this.store.deserializeFile(parsed as { path: string });
+          } else console.error("Cobrain: 分片缺少路径", c.f);
+        } catch (e) { console.error("Cobrain: 分片解析失败", c.f, e); }
       }
       return embedModel;
     }

@@ -42,20 +42,25 @@ export function normalizeSession(raw: unknown): ChatSession | null {
   if (!raw || typeof raw !== "object") return null;
   const r = raw as Record<string, unknown>;
   if (!validSessionId(r.id) || !Array.isArray(r.history)) return null;
-  const history = r.history.flatMap((m): ChatMsg[] => {
-    if (!m || typeof m !== "object") return [];
+  const rawHistory: unknown[] = r.history;
+  const history = rawHistory.flatMap((item): ChatMsg[] => {
+    if (!item || typeof item !== "object") return [];
+    const m = item as Record<string, unknown>;
     return (m.role === "user" || m.role === "assistant") && typeof m.content === "string"
       ? [{ role: m.role, content: m.content }] : [];
   });
   const materials: MaterialReference[] = [];
-  for (const m of Array.isArray(r.materials) ? r.materials : []) {
-    if (!m || typeof m.path !== "string" || !m.path || typeof m.id !== "string") continue;
+  const rawMaterials: unknown[] = Array.isArray(r.materials) ? r.materials : [];
+  for (const item of rawMaterials) {
+    if (!item || typeof item !== "object") continue;
+    const m = item as Record<string, unknown>;
+    if (typeof m.path !== "string" || !m.path || typeof m.id !== "string") continue;
     if (m.kind !== "document" && m.kind !== "selection") continue;
     if (m.kind === "selection" && typeof m.text !== "string") continue;
-    if (materials.some(item => item.id === m.id)) continue;
+    if (materials.some(entry => entry.id === m.id)) continue;
     materials.push({
       id: m.id, path: m.path, kind: m.kind,
-      origin: ["self", "external", "generated"].includes(m.origin) ? m.origin : "unknown",
+      origin: m.origin === "self" || m.origin === "external" || m.origin === "generated" ? m.origin : "unknown",
       ...(typeof m.text === "string" ? { text: m.text } : {}),
       ...(typeof m.heading === "string" ? { heading: m.heading } : {}),
     });

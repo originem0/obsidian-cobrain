@@ -19,17 +19,16 @@ export const ORIGIN_LABELS: Record<MaterialOrigin, string> = {
 export async function readMaterials(app: App, references: MaterialReference[]): Promise<MaterialDocument[]> {
   return Promise.all(references.map(async reference => {
     const file = app.vault.getAbstractFileByPath(reference.path);
-    if (reference.kind === "document" && !(file instanceof TFile)) {
-      throw new Error(`讨论文档已移动或删除：${reference.path}。请在材料范围中重新选择。`);
-    }
     const meta = file instanceof TFile ? app.metadataCache.getFileCache(file)?.frontmatter : undefined;
     const active = app.workspace.activeEditor;
-    // 当前编辑器可能还没落盘；其它附加文档直接读 vault，避免移动端依赖旧索引快照。
-    const text = reference.kind === "selection" ? reference.text ?? ""
-      : active?.file?.path === reference.path && active.editor
-        ? active.editor.getValue() : await app.vault.read(file as TFile);
+    // 选文用原文快照；文档优先读当前编辑器（可能还没落盘），其它文档直接读 vault，避免移动端依赖旧索引快照。
+    let text: string;
+    if (reference.kind === "selection") text = reference.text ?? "";
+    else if (!(file instanceof TFile)) throw new Error(`讨论文档已移动或删除：${reference.path}。请在材料范围中重新选择。`);
+    else text = active?.file?.path === reference.path && active.editor ? active.editor.getValue() : await app.vault.read(file);
     const origin = reference.origin === "unknown" && meta?.cobrain_generated === true ? "generated" : reference.origin;
-    const author = Array.isArray(meta?.author) ? meta.author.join("、") : meta?.author;
+    const rawAuthor: unknown = meta?.author;
+    const author = Array.isArray(rawAuthor) ? rawAuthor.join("、") : rawAuthor;
     return {
       reference: { ...reference, origin }, text,
       author: typeof author === "string" ? author : undefined,

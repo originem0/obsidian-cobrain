@@ -2,6 +2,7 @@ import { App, PluginSettingTab, Setting, Notice, DropdownComponent, Platform } f
 import { classifyModels, detectEmbeddingModels, listModels, testChat } from "./llm/probe";
 import { ensureCurrentOption } from "./llm/modelClassifier";
 import type CobrainPlugin from "./main";
+import type { TextComponent } from "obsidian";
 import { fnv1a } from "./util/hash";
 
 export interface CobrainSettings {
@@ -79,9 +80,7 @@ export const DEFAULT_SETTINGS: CobrainSettings = {
   notePrompt: DEFAULT_NOTE_PROMPT,
 };
 
-type SettingsData = { settings?: unknown; index?: unknown } | Record<string, unknown> | null | undefined;
-
-export function normalizeSettingsData(data: SettingsData): { settings: CobrainSettings; legacyIndex?: unknown } {
+export function normalizeSettingsData(data: unknown): { settings: CobrainSettings; legacyIndex?: unknown } {
   const source =
     data && typeof data === "object" && "settings" in data && data.settings && typeof data.settings === "object"
       ? data.settings as Record<string, unknown>
@@ -131,6 +130,7 @@ export class CobrainSettingTab extends PluginSettingTab {
   // 状态灯 / 模型下拉的元素引用,用于改 URL/Key 后就地刷新而不整页重绘(整页重绘会让输入框失焦)
   private statusEls: Partial<Record<EndpointKind, HTMLElement>> = {};
   private modelDropdowns: Partial<Record<EndpointKind, DropdownComponent>> = {};
+  private modelInputs: Partial<Record<EndpointKind, TextComponent>> = {};
 
   constructor(app: App, private plugin: CobrainPlugin) { super(app, plugin); }
 
@@ -139,7 +139,6 @@ export class CobrainSettingTab extends PluginSettingTab {
     containerEl.empty();
     containerEl.addClass("cobrain-settings");
     // 设置宿主/主题可能裁切内容或采用 flex；明确让本页滚动，折叠区按自然高度排列。
-    containerEl.setCssStyles({ display: "block", height: "100%", minHeight: "0", overflowY: "auto", overflowX: "hidden" });
 
     this.renderEndpointSection(containerEl, {
       title: "文本 LLM（对话）",
@@ -175,12 +174,9 @@ export class CobrainSettingTab extends PluginSettingTab {
     this.paintStatus(status, this.status[opts.kind]);
 
     if (opts.kind === "embed") {
-      const warn = body.createEl("p", {
+      body.createEl("p", {
         text: "隐私提示：建立索引会把你的笔记全文分块发送到这个嵌入端点。请显式配置你信任的端点。",
-      });
-      warn.setCssStyles({
-        fontSize: "0.85em", margin: "4px 0 10px", padding: "6px 10px", lineHeight: "1.5",
-        borderLeft: "3px solid var(--text-error)", background: "var(--background-secondary)", borderRadius: "4px",
+        cls: "cobrain-endpoint-warning",
       });
     }
 
@@ -188,15 +184,15 @@ export class CobrainSettingTab extends PluginSettingTab {
       // 多数用户文本和嵌入端点相同：一键复用文本端点的 URL/Key，砍掉重复粘贴（模型仍需单独检测选择）
       new Setting(body)
         .setName("复用文本端点")
-        .setDesc("把文本 LLM 的 Base URL 和 API Key 复制过来，模型仍需单独「检测」选择")
+        .setDesc("复制文本 LLM 的 Base URL 和 API Key；嵌入模型可手填或检测后选择")
         .addButton(b =>
           b.setButtonText("复制过来").onClick(() => {
             if (!s.llmBaseUrl && !s.llmKey) {
               new Notice("文本 LLM 端点还没配置");
               return;
             }
-            (s[opts.urlKey] as string) = s.llmBaseUrl;
-            (s[opts.keyKey] as string) = s.llmKey;
+            s[opts.urlKey] = s.llmBaseUrl;
+            s[opts.keyKey] = s.llmKey;
             this.status[opts.kind] = { state: "untested" };
             // 端点已换，旧检测列表作废
             if (opts.kind === "embed") this.detected.embed = [];
@@ -208,12 +204,27 @@ export class CobrainSettingTab extends PluginSettingTab {
     }
 
     this.text(body, "Base URL", "OpenAI 兼容端点", opts.urlKey, "", opts.kind);
-    this.secretText(body, "API Key", "仅存本地，不入库", opts.keyKey, "sk-...", opts.kind);
+    this.secretText(body, "API Key", "明文保存在库内插件数据中；同步插件目录时也会同步密钥", opts.keyKey, "sk-...", opts.kind);
 
     const detectedOptions = this.modelOptions(opts.kind, s[opts.modelKey]);
     new Setting(body)
       .setName("Model")
       .setDesc(this.modelDesc(opts.kind, detectedOptions.length))
+      .addText(t => {
+        this.modelInputs[opts.kind] = t;
+        t.setPlaceholder("手填模型名称").setValue(s[opts.modelKey]);
+        t.inputEl.name = `cobrain-${opts.kind}-model`;
+        t.inputEl.setAttribute("aria-label", `${opts.kind === "chat" ? "文本" : "嵌入"}模型名称`);
+        if (opts.kind === "embed") {
+          // 更换嵌入模型会清索引，只在完成编辑时提交，避免每敲一个字就重置。
+          t.inputEl.disabled = Platform.isMobile;
+          t.inputEl.addEventListener("change", () => {
+            void this.changeModel(opts.kind, t.inputEl.value).catch(e => this.plugin.reportError(e));
+          });
+        } else {
+          t.onChange(value => { void this.changeModel(opts.kind, value).catch(e => this.plugin.reportError(e)); });
+        }
+      })
       .addButton(b =>
         b.setButtonText("检测").onClick(async () => {
           if (!s[opts.urlKey] || !s[opts.keyKey]) {
@@ -258,25 +269,10 @@ export class CobrainSettingTab extends PluginSettingTab {
       )
       .addDropdown(d => {
         this.modelDropdowns[opts.kind] = d;
+        d.addOption("", "从检测结果选择…");
         for (const item of detectedOptions) d.addOption(item.value, item.label);
-        d.setValue(s[opts.modelKey]).onChange(async v => {
-          if (v === s[opts.modelKey]) return;
-          // 移动端只读：换嵌入模型会清空索引并要求重建，而移动端无法重建——撤销 UI 选择、不改设置。
-          if (opts.kind === "embed" && Platform.isMobile) {
-            d.setValue(s[opts.modelKey]);
-            new Notice("嵌入模型请在桌面端更换（移动端只读）");
-            return;
-          }
-          s[opts.modelKey] = v;
-          this.status[opts.kind] = { state: "untested" };
-          if (opts.kind === "embed") {
-            await this.plugin.saveSettings();
-            // 换模型 → 旧向量维度/空间不兼容，立即清空，待重建
-            await this.plugin.resetIndexForEmbedModelChange();
-            new Notice(`已切到 ${v}，索引已清空，请运行「Cobrain: 重建索引」`);
-          } else {
-            this.plugin.saveSettingsDebounced();
-          }
+        d.setValue(s[opts.modelKey]).onChange(v => {
+          if (v) void this.changeModel(opts.kind, v).catch(e => this.plugin.reportError(e));
         });
       });
 
@@ -405,10 +401,10 @@ export class CobrainSettingTab extends PluginSettingTab {
 
   private renderPromptSection(container: HTMLElement): void {
     const { body } = this.collapsible(container, "提示词（可自定义）", false);
-    const note = body.createEl("p", {
+    body.createEl("p", {
       text: "提示词引导对话、概念图和笔记整理，但不保证事实或格式正确。自定义内容会保留，点「恢复默认」使用新版。",
+      cls: "cobrain-prompt-description",
     });
-    note.setCssStyles({ fontSize: "0.85em", color: "var(--text-muted)", margin: "4px 0 12px", lineHeight: "1.5" });
     this.promptTextArea(body, "副脑人设", "对话时的系统提示词", "tutorPrompt", DEFAULT_TUTOR_PROMPT);
     this.promptTextArea(body, "概念图", "生成 Mermaid 概念图的提示词（方向/详细度由上方设置注入）", "conceptMapPrompt", DEFAULT_CONCEPT_MAP_PROMPT);
     this.promptTextArea(body, "笔记综述", "把对话整理成笔记的提示词", "notePrompt", DEFAULT_NOTE_PROMPT);
@@ -473,7 +469,7 @@ export class CobrainSettingTab extends PluginSettingTab {
         this.plugin.saveSettingsDebounced();
       });
       t.inputEl.rows = 6;
-      t.inputEl.setCssStyles({ width: "100%" });
+      t.inputEl.addClass("cobrain-setting-textarea");
     });
   }
 
@@ -484,14 +480,14 @@ export class CobrainSettingTab extends PluginSettingTab {
       .setName(name)
       .setDesc(desc)
       .addTextArea(t => {
-        setValue = (v: string) => t.setValue(v);
+        setValue = (v: string) => { t.setValue(v); };
         t.setValue(s[key]).onChange(v => {
           s[key] = v;
           this.plugin.saveSettingsDebounced();
         });
         // 人设提示词动辄几百字，6 行的编辑窗口是在惩罚认真调提示词的用户
         t.inputEl.rows = 14;
-        t.inputEl.setCssStyles({ width: "100%", resize: "vertical" });
+        t.inputEl.addClass("cobrain-setting-textarea");
       })
       .addButton(b =>
         b.setButtonText("恢复默认").onClick(async () => {
@@ -509,38 +505,50 @@ export class CobrainSettingTab extends PluginSettingTab {
     title: string,
     open: boolean,
   ): { body: HTMLElement; status: HTMLElement } {
-    const details = container.createEl("details");
+    const details = container.createEl("details", { cls: "cobrain-settings-section" });
     details.open = open;
-    details.setCssStyles({
-      margin: "0 0 10px", padding: "0", border: "1px solid var(--background-modifier-border)",
-      borderRadius: "6px", background: "var(--background-primary)",
-    });
     const summary = details.createEl("summary");
-    summary.setCssStyles({
-      display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px",
-      cursor: "pointer", padding: "10px 12px", fontWeight: "600",
-    });
     summary.createSpan({ text: title });
-    const status = summary.createSpan();
-    status.setCssStyles({ fontSize: "0.82em", fontWeight: "500", color: "var(--text-muted)", whiteSpace: "nowrap" });
-    const body = details.createDiv();
-    body.setCssStyles({ padding: "0 12px 12px" });
+    const status = summary.createSpan({ cls: "cobrain-endpoint-status" });
+    const body = details.createDiv({ cls: "cobrain-settings-section-body" });
     return { body, status };
   }
 
   private paintStatus(el: HTMLElement, status: EndpointStatus): void {
+    el.removeClass("is-ok", "is-fail");
     if (status.state === "ok") {
       el.setText(`● ${status.text ?? "已连通"}`);
-      el.setCssStyles({ color: "var(--text-success)" });
+      el.addClass("is-ok");
       return;
     }
     if (status.state === "fail") {
       el.setText(`✗ ${status.text ?? "失败"}`);
-      el.setCssStyles({ color: "var(--text-error)" });
+      el.addClass("is-fail");
       return;
     }
     el.setText(`○ ${status.text ?? "未测"}`);
-    el.setCssStyles({ color: "var(--text-muted)" });
+  }
+
+  private async changeModel(kind: EndpointKind, raw: string): Promise<void> {
+    const key = MODEL_KEY[kind], value = raw.trim(), settings = this.plugin.settings;
+    if (kind === "embed" && Platform.isMobile) {
+      this.modelInputs[kind]?.setValue(settings[key]);
+      this.refreshModelDropdown(kind);
+      new Notice("嵌入模型请在桌面端更换（移动端只读）");
+      return;
+    }
+    if (value === settings[key]) return;
+    settings[key] = value;
+    this.status[kind] = { state: "untested" };
+    const status = this.statusEls[kind];
+    if (status) this.paintStatus(status, this.status[kind]);
+    this.modelInputs[kind]?.setValue(value);
+    this.refreshModelDropdown(kind);
+    if (kind === "embed") {
+      await this.plugin.saveSettings();
+      await this.plugin.resetIndexForEmbedModelChange();
+      new Notice("嵌入模型已更换，旧索引已清空。请在桌面端重建允许范围的索引。");
+    } else this.plugin.saveSettingsDebounced();
   }
 
   private refreshModelDropdown(kind: EndpointKind): void {
@@ -548,8 +556,9 @@ export class CobrainSettingTab extends PluginSettingTab {
     if (!d) return;
     const current = this.plugin.settings[MODEL_KEY[kind]];
     d.selectEl.empty();
+    d.addOption("", "从检测结果选择…");
     for (const opt of this.modelOptions(kind, current)) d.addOption(opt.value, opt.label);
-    if (current) d.setValue(current);
+    d.setValue(current);
   }
 
   private modelOptions(kind: EndpointKind, current: string): { value: string; label: string }[] {
@@ -569,9 +578,9 @@ export class CobrainSettingTab extends PluginSettingTab {
     if (kind === "embed") {
       return this.detected.embed.length
         ? `已检测到 ${count} 个实际可用嵌入模型`
-        : "点「检测」列出并真实试用该端点的嵌入模型";
+        : "可手填模型名称，离开输入框后保存；也可检测后选择。移动端沿用桌面配置";
     }
     if (this.detected[kind].length) return `已检测到 ${count} 个候选模型，下拉选择`;
-    return "点「检测」从 /models 拉取候选模型；也可直接保留当前值";
+    return "可直接填写模型名称；检测只是辅助，不要求端点提供 /models";
   }
 }
