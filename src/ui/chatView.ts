@@ -109,6 +109,14 @@ export class ChatView extends ItemView {
         event.preventDefault(); if (!this.busy) this.ui(() => this.send());
       }
     };
+    // 切回窗口或从后台恢复时接上其它设备的更新，减少在旧内容上继续编辑。
+    const doc = this.contentEl.ownerDocument, win = doc.defaultView ?? window;
+    const catchUp = () => {
+      const session = this.session;
+      if (session && !this.busy && !this.sending) this.ui(() => this.plugin.sessions.reconcile(session));
+    };
+    this.registerDomEvent(win, "focus", catchUp);
+    this.registerDomEvent(doc, "visibilitychange", () => { if (doc.visibilityState === "visible") catchUp(); });
   }
   private iconButton(parent: HTMLElement, icon: string, label: string): HTMLButtonElement {
     const button = parent.createEl("button", { cls: "cobrain-icon-button" });
@@ -151,7 +159,8 @@ export class ChatView extends ItemView {
     this.refreshSessionHeader();
     if (this.busy || this.sending) return;
     const top = this.messagesEl.scrollTop, following = this.following;
-    this.inputEl.value = this.session.composer; this.autoGrow();
+    // 只在草稿确实变化时重设输入框，否则正在输入时光标会跳到末尾。
+    if (this.inputEl.value !== this.session.composer) { this.inputEl.value = this.session.composer; this.autoGrow(); }
     await this.renderHistory();
     if (following) this.scrollToBottom(); else this.messagesEl.scrollTop = top;
   }
@@ -303,14 +312,17 @@ export class ChatView extends ItemView {
   }
   private async send(): Promise<void> {
     if (!this.session || this.busy || this.sending) return;
-    const text = this.inputEl.value.trim();
-    if (!text) return;
+    if (!this.inputEl.value.trim()) return;
     const problem = this.plugin.chatConfigProblem();
     if (problem) { new Notice(problem); return; }
     const release = this.plugin.acquireSessionRequest(this.session.id);
     if (!release) { new Notice("这段会话正在另一个面板中回答，请稍后继续。"); return; }
     this.sending = true;
     try {
+      if (!await this.catchUp()) return;
+      // 接上记录期间可能还在输入，按此刻输入框里的内容发送。
+      const text = this.inputEl.value.trim();
+      if (!text) return;
       this.messagesEl.querySelectorAll(".cobrain-empty, .cobrain-retry").forEach(el => el.remove());
       this.session.history.push({ role: "user", content: text });
       this.session.composer = ""; this.inputEl.value = ""; this.autoGrow();
@@ -319,12 +331,23 @@ export class ChatView extends ItemView {
       await this.startResponse("ask", release);
     } finally { this.sending = false; release(); }
   }
+  // 提问或回答前先接上其它设备的记录：在旧内容上追加，两边历史分叉后只能另存副本。
+  private async catchUp(): Promise<boolean> {
+    const session = this.session;
+    if (!session) return false;
+    const before = session.history.length;
+    await this.plugin.sessions.reconcile(session);
+    if (this.closed || this.session !== session) return false;
+    if (session.history.length !== before) await this.renderHistory();
+    return true;
+  }
   private async startResponse(kind: "ask" | "critique" | "concept", ownedRelease?: () => void): Promise<void> {
     if (!this.session || this.busy) return;
     const problem = this.plugin.chatConfigProblem();
     if (problem) { new Notice(problem); return; }
     const release = ownedRelease ?? this.plugin.acquireSessionRequest(this.session.id);
     if (!release) { new Notice("这段会话正在另一个面板中回答，请稍后继续。"); return; }
+    if (!ownedRelease && !await this.catchUp()) { release(); return; }
     const task = this.respond(kind);
     this.currentTask = task;
     try { await task; } finally { release(); if (this.currentTask === task) this.currentTask = null; }

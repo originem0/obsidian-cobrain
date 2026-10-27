@@ -1,4 +1,4 @@
-import { Plugin, Notice, TFile, TFolder, Modal, App, debounce, Platform, Editor, MarkdownFileInfo, WorkspaceLeaf } from "obsidian";
+import { Plugin, Notice, TFile, TFolder, Modal, App, debounce, Platform, Editor, MarkdownFileInfo, WorkspaceLeaf, requireApiVersion } from "obsidian";
 import { CobrainSettings, CobrainSettingTab, normalizeSettingsData } from "./settings";
 import { ApiEmbedder } from "./rag/apiEmbedder";
 import { VectorStore, type QueryHit } from "./rag/vectorStore";
@@ -12,7 +12,7 @@ import { IndexStore } from "./rag/indexStore";
 import type { IndexFailure } from "./rag/indexer";
 import { parseFolders, type RetrievalScope } from "./rag/scope";
 import { SessionStore } from "./chat/sessionStore";
-import { newSession, migrateLegacyDrafts, type ChatSession, type MaterialReference } from "./chat/session";
+import { newSession, migrateLegacyDrafts, randomId, validSessionId, type ChatSession, type MaterialReference } from "./chat/session";
 import { RetrievalModal } from "./ui/retrievalModal";
 export type { SavedNoteState, ContextSummaryState } from "./chat/session";
 
@@ -44,7 +44,7 @@ export default class CobrainPlugin extends Plugin {
     await this.loadSettings();
     const base = this.manifest.dir ?? `${this.app.vault.configDir}/plugins/${this.manifest.id}`;
     this.sessions = new SessionStore(this.app.vault.adapter, `${base}/sessions`, message => new Notice(message, 10000),
-      (session, previousId) => this.sessionChanged(session, previousId));
+      (session, previousId) => this.sessionChanged(session, previousId), this.deviceId());
     await this.sessions.init();
     if (!this.sessionsMigrated) {
       for (const session of migrateLegacyDrafts(this.legacyDrafts)) {
@@ -150,6 +150,16 @@ export default class CobrainPlugin extends Plugin {
     }));
     this.settingsQueue = run;
     return run;
+  }
+  // 恢复快照按设备区分，标识存在本机、不随库同步。1.8.7 以前没有这类存储，每次启动使用临时标识：
+  // 合并照常，只是重启后找回中断写入的能力退化。
+  private deviceId(): string {
+    const key = "cobrain-device-id";
+    const saved: unknown = requireApiVersion("1.8.7") ? this.app.loadLocalStorage(key) : null;
+    if (validSessionId(saved)) return saved;
+    const id = randomId("device");
+    if (requireApiVersion("1.8.7")) this.app.saveLocalStorage(key, id);
+    return id;
   }
   currentDocument(): TFile | null {
     const active = this.app.workspace.getActiveFile();

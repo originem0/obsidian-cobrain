@@ -29,10 +29,14 @@ export type SessionInfo = Pick<ChatSession, "id" | "title" | "createdAt" | "upda
 export function validSessionId(id: unknown): id is string {
   return typeof id === "string" && /^[a-zA-Z0-9_-]{1,100}$/.test(id);
 }
+// 会话与设备标识共用：只含字母、数字和连字符，可直接用作文件名的一段。
+export function randomId(prefix: string): string {
+  return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
 export function newSession(materials: MaterialReference[] = []): ChatSession {
   const now = Date.now();
   return {
-    id: `chat-${now.toString(36)}-${Math.random().toString(36).slice(2, 10)}`,
+    id: randomId("chat"),
     title: "新对话", createdAt: now, updatedAt: now,
     history: [], materials, composer: "", sources: [], contextSummary: null,
     lastMermaid: null, lastSavedNote: null,

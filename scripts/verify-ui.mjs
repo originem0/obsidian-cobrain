@@ -1,5 +1,5 @@
 import { build } from "esbuild";
-import { readFile, writeFile, mkdir, mkdtemp, access } from "node:fs/promises";
+import { readFile, writeFile, mkdir, mkdtemp, access, rm } from "node:fs/promises";
 import { createServer } from "node:http";
 import { spawn } from "node:child_process";
 import path from "node:path";
@@ -128,4 +128,8 @@ try {
   socket?.close();
   if (browser.exitCode === null) browser.kill();
   server.close();
+  // 每次运行使用独立的临时浏览器配置；等浏览器退出、释放文件后删除，避免在 .audit/ui 下堆积。
+  if (browser.exitCode === null && browser.signalCode === null) await new Promise(resolve => browser.once("exit", resolve));
+  await rm(profile, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 })
+    .catch(error => console.warn(`Temporary browser profile was not removed: ${error.message}`));
 }

@@ -158,8 +158,9 @@ w.runTests = async () => {
   assert(Math.abs(scroller.scrollTop - scrollBefore) < 5, "Completion forced scrolling");
   assert(document.activeElement === reader, "Completion forced focus");
   passed.push("stream completion preserves reading position and focus");
+  // 一次提问只应增加提问和一条回答；保存失败后重试不能把回答追加两次。
+  const expected = long.history.length + 2;
   responseMode = "immediate"; input("保存失败不能重复追加回答"); failSave = true; click("发送");
-  const expected = long.history.length + 1;
   await until(() => !(view as any).busy && long.history.length === expected, "save retry");
   assert(long.history.length === expected, "Save failure duplicated reply");
   passed.push("storage error does not duplicate reply");
@@ -173,6 +174,17 @@ w.runTests = async () => {
   const savedNote = [...docs.values()].find(content => content.includes("用户审阅后的判断"))!;
   assert(savedNote.includes("阅读/因果推断") && !savedNote.includes("外部/另一篇文章"), "Save mixed in new session sources");
   passed.push("editable summary snapshot survives session switch and keeps original sources");
+  // 另一台设备已在同一会话追加问答：在内容过期的面板上发送，应先接上外部记录，不另存副本。
+  const stale = (view as any).session as ChatSession, count = sessions.list().length;
+  const stored = JSON.parse(files.get(`plugin/sessions/${stale.id}.json`)!) as ChatSession & { clock: Record<string, number> };
+  stored.history.push({ role: "user", content: "另一台设备上的追问" }, { role: "assistant", content: "另一台设备收到的回答" });
+  stored.clock = { ...stored.clock, "device-other": 1 };
+  files.set(`plugin/sessions/${stale.id}.json`, JSON.stringify(stored));
+  input("在旧面板上继续问"); click("发送");
+  await until(() => !(view as any).busy && stale.history.length === stored.history.length + 2, "catch up before sending");
+  assert(stale.history[stored.history.length - 1].content === "另一台设备收到的回答" && stale.history.at(-2)?.content === "在旧面板上继续问", "Stale panel did not catch up before sending");
+  assert(sessions.list().length === count && host.textContent?.includes("另一台设备收到的回答"), "Stale panel forked or did not render the caught-up reply");
+  passed.push("stale panel catches up with another device before sending");
   assert(errors.length === 0, `Unexpected errors: ${errors.join(", ")}`);
   return { passed, modelCalls: modelCalls.length, sessions: sessions.list().length };
 };

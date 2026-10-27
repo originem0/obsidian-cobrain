@@ -1,7 +1,7 @@
 {
   "id": "cobrain",
   "name": "Cobrain",
-  "version": "0.6.2",
+  "version": "0.6.3",
   "minAppVersion": "1.7.2",
   "description": "Discuss selected documents, preserve independent conversations, and turn ideas into reviewable notes.",
   "author": "samsara",

@@ -23,6 +23,7 @@ export class Component {
   children: Component[] = [];
   cleanup: (() => void)[] = [];
   register(cb: () => void) { this.cleanup.push(cb); }
+  registerDomEvent(el: EventTarget, type: string, cb: EventListener) { el.addEventListener(type, cb); this.register(() => el.removeEventListener(type, cb)); }
   addChild<T extends Component>(child: T): T { this.children.push(child); return child; }
   removeChild<T extends Component>(child: T): T { this.children = this.children.filter(c => c !== child); child.unload(); return child; }
   unload() { for (const cb of this.cleanup) cb(); for (const child of this.children) child.unload(); this.children = []; }

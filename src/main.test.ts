@@ -9,15 +9,15 @@ jest.mock("obsidian", () => ({
   Component: class {}, Modal: class {}, FuzzySuggestModal: class {}, Menu: class {},
   ItemView: class { constructor(public leaf: any) {} }, WorkspaceLeaf: class {}, MarkdownRenderer: {},
   Platform: { isMobile: false }, debounce: (fn: any) => Object.assign(fn, { cancel: jest.fn() }),
-  normalizePath: (p: string) => p.replace(/\\/g, "/"),
+  normalizePath: (p: string) => p.replace(/\\/g, "/"), requireApiVersion: jest.fn(() => false),
 }), { virtual: true });
-import { App, TFile, Platform } from "obsidian";
+import { App, TFile, Platform, requireApiVersion } from "obsidian";
 import CobrainPlugin from "./main";
 import { ChatView } from "./ui/chatView";
 import { IndexStore } from "./rag/indexStore";
 
 (globalThis as any).window = globalThis;
-async function fixture(data: unknown = {}) {
+async function fixture(data: unknown = {}, deviceStorage = new Map<string, unknown>()) {
   const files = new Map<string, string>(); const folders = new Set<string>(); const leaves: any[] = [];
   const docA = Object.assign(new TFile(), { path: "自己/a.md", extension: "md" });
   const docB = Object.assign(new TFile(), { path: "外部/b.md", extension: "md" });
@@ -30,6 +30,8 @@ async function fixture(data: unknown = {}) {
     remove: async (p: string) => { files.delete(p); }, list: async (p: string) => ({ files: [...files.keys()].filter(f => f.startsWith(p + "/")), folders: [] }),
   };
   const app: any = {
+    loadLocalStorage: (key: string) => deviceStorage.get(key) ?? null,
+    saveLocalStorage: (key: string, value: unknown) => { deviceStorage.set(key, value); },
     vault: { adapter, configDir: ".obsidian", on: (name: string, cb: (...args: any[]) => unknown) => { vaultEvents[name] = cb; return {}; }, getAbstractFileByPath: (path: string) => [docA, docB].find(f => f.path === path) ?? null },
     workspace: {
       on: (name: string, cb: (...args: any[]) => unknown) => { events[name] = cb; return {}; },
@@ -66,8 +68,9 @@ test("冲突分流后请求锁和当前会话仍跟随本地副本", async () =>
   const id = session.id;
   await plugin.rememberSession(id);
   const release = plugin.acquireSessionRequest(id)!;
-  session.composer = "本地草稿";
-  files.set(`.obsidian/plugins/cobrain/sessions/${id}.json`, JSON.stringify({ ...session, composer: "", history: [{ role: "user", content: "外部问题" }] }));
+  // 两边各自追加了不同的消息，无法自动合并，才会另存副本。
+  session.history.push({ role: "user", content: "本地问题" });
+  files.set(`.obsidian/plugins/cobrain/sessions/${id}.json`, JSON.stringify({ ...session, history: [{ role: "user", content: "外部问题" }] }));
   await plugin.persistSession(session);
   expect(view.sessionId).toBe(session.id);
   expect(session.id).not.toBe(id);
@@ -77,6 +80,23 @@ test("冲突分流后请求锁和当前会话仍跟随本地副本", async () =>
   await plugin.saveSettings();
   expect((plugin.saveData as jest.Mock).mock.calls.at(-1)[0].lastSessionId).toBe(session.id);
   expect(app.workspace.requestSaveLayout).toHaveBeenCalled();
+});
+test("设备标识保存在本机并在重启后沿用，快照按设备命名", async () => {
+  (requireApiVersion as jest.Mock).mockReturnValue(true);
+  try {
+    const storage = new Map<string, unknown>();
+    const first = await fixture({}, storage);
+    await first.plugin.createSession();
+    const device = storage.get("cobrain-device-id");
+    expect(typeof device).toBe("string");
+    const snapshots = (files: Map<string, string>) => [...files.keys()].filter(p => p.includes("/sessions/recovery/"));
+    expect(snapshots(first.files).every(p => p.endsWith(`.${String(device)}.json`))).toBe(true);
+    const second = await fixture({}, storage);
+    await second.plugin.createSession();
+    expect(storage.get("cobrain-device-id")).toBe(device);
+    expect(snapshots(second.files).length).toBeGreaterThan(0);
+    expect(snapshots(second.files).every(p => p.endsWith(`.${String(device)}.json`))).toBe(true);
+  } finally { (requireApiVersion as jest.Mock).mockReturnValue(false); }
 });
 test("桌面可以新开超过三个独立会话和面板", async () => {
   const { plugin, leaves } = await fixture();
